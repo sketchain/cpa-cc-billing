@@ -1,6 +1,6 @@
-const PLUGIN_BASE = "/v0/management/plugins/cpa-key-billing";
-const ACCOUNT_BASE = "/v0/resource/plugins/cpa-key-billing";
-const PRODUCT_NAME = "CPA Key Billing";
+const PLUGIN_BASE = "/v0/management/plugins/cpa-cc-billing";
+const ACCOUNT_BASE = "/v0/resource/plugins/cpa-cc-billing";
+const PRODUCT_NAME = "CPA CC Billing";
 const DISPLAY_SEPARATOR = "\u2009·\u2009";
 const DISPLAY_SLASH = "\u2009/\u2009";
 const $ = (id) => document.getElementById(id);
@@ -8,17 +8,17 @@ const { message: m, setText, setAttribute: setTextAttribute, UIError } = window.
 const locale = () => window.billingI18n.locale();
 window.billingI18n.initialize();
 
-const CREDENTIAL_DB = "cpa-key-billing-credentials";
+const CREDENTIAL_DB = "cpa-cc-billing-credentials";
 const CREDENTIAL_STORE = "vault";
 const CREDENTIAL_KEY = "wrapping-key";
-const SESSION_CREDENTIAL_PREFIX = "cpa-key-billing.session.v1.";
-const VIEW_PREFERENCE_PREFIX = "cpa-key-billing.view.v1.";
+const SESSION_CREDENTIAL_PREFIX = "cpa-cc-billing.session.v1.";
+const VIEW_PREFERENCE_PREFIX = "cpa-cc-billing.view.v1.";
 
 const embedded = window.parent !== window;
 document.body.classList.toggle("embedded", embedded);
 const ADMIN_TAB_IDS = ["keys", "analysis", "request-events", "errors", "auth-files", "ai-providers", "settings"];
 const ACCOUNT_TAB_IDS = ["subscription", "analysis", "request-events", "errors", "auth-files", "ai-providers"];
-const PAGE_ROUTE_KEY = "cpa-key-billing.route.v1." + (embedded ? "embedded" : "standalone");
+const PAGE_ROUTE_KEY = "cpa-cc-billing.route.v1." + (embedded ? "embedded" : "standalone");
 
 function parsePageRoute(value) {
   const [role, tab] = value.split("/");

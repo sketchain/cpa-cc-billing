@@ -147,7 +147,7 @@ func (a *App) registration() Registration {
 		Metadata: Metadata{
 			Name:             PluginName,
 			Version:          Version,
-			Author:           PluginName,
+			Author:           PluginAuthor,
 			GitHubRepository: GitHubRepository,
 			Logo:             pluginLogo,
 			ConfigFields: []ConfigField{

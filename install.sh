@@ -2,14 +2,14 @@
 
 set -eu
 
-repository="haowang02/cpa-plugin-key-billing"
-plugin_name="cpa-key-billing"
+repository="sketchain/cpa-cc-billing"
+plugin_name="cpa-cc-billing"
 plugin_dir="$(pwd)/plugins"
 tmp_dir=""
 staged_file=""
 
 fail() {
-  printf 'cpa-key-billing: %s\n' "$*" >&2
+  printf 'cpa-cc-billing: %s\n' "$*" >&2
   exit 1
 }
 

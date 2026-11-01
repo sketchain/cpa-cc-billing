@@ -464,8 +464,8 @@ func retryAfterSeconds(resetAt, now time.Time) int {
 
 func priceRefusal(format, code, message string) RequestInterceptResponse {
 	kind := refusal{
-		anthropicType: "cpa_key_billing_error",
-		openaiType:    "cpa_key_billing_error",
+		anthropicType: "cpa_cc_billing_error",
+		openaiType:    "cpa_cc_billing_error",
 		openaiCode:    code,
 	}
 	return RequestInterceptResponse{

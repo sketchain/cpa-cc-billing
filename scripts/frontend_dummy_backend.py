@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 UI_DIR = ROOT / "internal" / "plugin" / "web"
 # Matches the placeholders internal/plugin/ui.go replaces with sibling files.
 UI_INCLUDE = re.compile(r"/\*([a-z0-9-]+\.(?:css|js))\*/")
-API_BASE = "/v0/management/plugins/cpa-key-billing"
-RESOURCE_BASE = "/v0/resource/plugins/cpa-key-billing"
+API_BASE = "/v0/management/plugins/cpa-cc-billing"
+RESOURCE_BASE = "/v0/resource/plugins/cpa-cc-billing"
 NOW = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 CALLER_SCOPE_SALT = b"cli-proxy-api:caller-scope:v1\0"
 
@@ -30,7 +30,7 @@ HOST_SHELL = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__HOST_LABEL__ · CPA Key Billing 样式预览</title>
+<title>__HOST_LABEL__ · CPA CC Billing 样式预览</title>
 <script>
 {
   const scope="__HOST_MODE__"==="cpamp"?"v2|"+location.host:location.host;
@@ -163,10 +163,10 @@ html[data-host=cpamp] #plugin-frame{background:var(--bg-primary)}
 <body>
 <aside class="sidebar">
   <div class="brand"><span class="brand-mark">◈</span><span>__HOST_LABEL__</span></div>
-  <div class="nav-placeholder"><span>仪表盘</span><span>AI 提供商</span><span>插件管理</span><span class="active">CPA Key Billing</span></div>
+  <div class="nav-placeholder"><span>仪表盘</span><span>AI 提供商</span><span>插件管理</span><span class="active">CPA CC Billing</span></div>
 </aside>
 <header class="navbar">
-  <div class="navbar-left"><button class="mobile-menu" title="菜单">☰</button><span>CPA Key Billing</span></div>
+  <div class="navbar-left"><button class="mobile-menu" title="菜单">☰</button><span>CPA CC Billing</span></div>
   <div class="theme-controls" aria-label="预览主题">
     <select id="host-language" aria-label="Language"><option value="en">English</option><option value="zh-CN">简体中文</option><option value="zh-TW">繁體中文</option><option value="ru">Русский</option></select>
     <button type="button" data-action="refresh" title="刷新">↻</button>
@@ -175,7 +175,7 @@ html[data-host=cpamp] #plugin-frame{background:var(--bg-primary)}
     <button type="button" data-theme-choice="dark" title="深色主题">●</button>
   </div>
 </header>
-<main class="content"><iframe id="plugin-frame" src="/ui" title="CPA Key Billing 插件"></iframe></main>
+<main class="content"><iframe id="plugin-frame" src="/ui" title="CPA CC Billing 插件"></iframe></main>
 <script>
 "use strict";
 const HOST_MODE="__HOST_MODE__";
@@ -1421,7 +1421,7 @@ PLUGIN_LOGS = [
         "at": iso(NOW - timedelta(minutes=11)),
         "level": "info",
         "message": (
-            "已加载计费数据库 /srv/cli-proxy-api/plugins/cpa-key-billing-state-v1.db："
+            "已加载计费数据库 /srv/cli-proxy-api/plugins/cpa-cc-billing-state-v1.db："
             "8 个 API Key、3 个订阅计划、29 条请求事件。已启用。"
         ),
     },
@@ -1941,7 +1941,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # Mirrors the plugin's catalog filtering for model rules; management asks for every model.
             payload = payload_for(parsed.path, query)
-            if self.headers.get("X-CPA-Key-Billing-Models", "").lower() != "all":
+            if self.headers.get("X-CPA-CC-Billing-Models", "").lower() != "all":
                 models, _, _, denied_models, _, _ = account_routing(api_keys.index(authorization[7:]))
                 payload["data"] = [row for row in payload["data"] if (not models or row["id"] in models) and row["id"] not in denied_models]
             self.send_json(200, payload)
