@@ -1,0 +1,72 @@
+name: Auto release
+
+# Tags each new version on main and starts its release. The version is the
+# first "## vX.Y.Z" heading of Changelog.md, which must match the plugin
+# Version in internal/plugin/types.go. A tag pushed with GITHUB_TOKEN does not
+# trigger release.yml's tag event, so this workflow dispatches it explicitly.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag and dispatch release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Read release version
+        id: version
+        run: |
+          heading="$(grep -m1 '^## ' Changelog.md || true)"
+          if ! printf '%s\n' "$heading" | grep -Eq '^## v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error file=Changelog.md::The first release heading must be '## vX.Y.Z', found '$heading'"
+            exit 1
+          fi
+          tag="${heading#'## '}"
+          plugin_version="$(awk -F'"' '/^[[:space:]]*Version[[:space:]]*=/ {print $2; exit}' internal/plugin/types.go)"
+          if [ "$tag" != "v$plugin_version" ]; then
+            echo "::error file=internal/plugin/types.go::Changelog.md is at $tag but the plugin Version is $plugin_version"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag
+        id: tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists; nothing to release."
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch release workflow
+        if: steps.tag.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f release_tag="$TAG"
