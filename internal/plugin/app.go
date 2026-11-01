@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"cpa-key-billing/internal/billing"
+	"cpa-key-billing/internal/ccbilling"
 	"cpa-key-billing/internal/sqlite"
 )
 
@@ -27,6 +28,7 @@ type App struct {
 	pending               map[string]pendingRouteLog
 	pendingSequence       uint64
 	authModelsSupported   atomic.Bool
+	cc                    *ccbilling.Manager
 }
 
 func (a *App) SetHostCaller(caller HostCaller) {
@@ -49,6 +51,7 @@ func newApp(store *billing.Store) *App {
 	if app.store == nil {
 		app.store = billing.NewStore(openRepository, app.downloadReferencePrices)
 	}
+	app.cc = newCCManager(app)
 	return app
 }
 
