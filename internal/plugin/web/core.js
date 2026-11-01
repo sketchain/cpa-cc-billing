@@ -16,7 +16,7 @@ const VIEW_PREFERENCE_PREFIX = "cpa-cc-billing.view.v1.";
 
 const embedded = window.parent !== window;
 document.body.classList.toggle("embedded", embedded);
-const ADMIN_TAB_IDS = ["keys", "analysis", "request-events", "errors", "auth-files", "ai-providers", "settings"];
+const ADMIN_TAB_IDS = ["keys", "analysis", "request-events", "errors", "auth-files", "ai-providers", "cc", "settings"];
 const ACCOUNT_TAB_IDS = ["subscription", "analysis", "request-events", "errors", "auth-files", "ai-providers"];
 const PAGE_ROUTE_KEY = "cpa-cc-billing.route.v1." + (embedded ? "embedded" : "standalone");
 

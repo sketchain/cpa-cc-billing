@@ -16,6 +16,7 @@
     <style>
       /*style.css*/
       /*table-selection.css*/
+      /*cc.css*/
     </style>
     <script>
       /*theme.js*/
@@ -65,6 +66,7 @@
                 <button type="button" data-tab="errors" data-i18n="ui.error_events">Error events</button>
                 <button type="button" data-tab="auth-files" data-i18n="ui.auth_files">Auth Files</button>
                 <button type="button" data-tab="ai-providers" data-i18n="ui.ai_providers">AI Providers</button>
+                <button type="button" data-tab="cc" data-i18n="cc.tab">CC split</button>
                 <button type="button" data-tab="settings" data-i18n="ui.settings">Settings</button>
               </div>
               <span class="native-select page-tab-select">
@@ -211,6 +213,8 @@
               <h2><span data-i18n="ui.model_pricing">Model pricing</span><span class="price-unit" data-i18n="ui.per_1m_tokens">per 1M tokens</span></h2>
               <div class="row section-actions">
                 <input id="price-filter" placeholder="Search models"  data-i18n-placeholder="ui.search_models"/>
+                <button id="price-import" type="button" data-i18n="cc.import_prices">Import JSON</button>
+                <input id="price-import-file" type="file" accept="application/json,.json" hidden />
                 <button id="price-reference-refresh" data-i18n="ui.update_references">Update references</button>
                 <button id="price-new" data-i18n="ui.add_pricing">Add pricing</button>
               </div>
@@ -318,6 +322,20 @@
               </div>
             </div>
             <div id="ai-providers-body" class="credential-list"></div>
+          </div>
+        </section>
+
+        <section id="tab-cc" class="hidden">
+          <div class="card">
+            <div class="row spread section-toolbar">
+              <h2 data-i18n="cc.title">CC split</h2>
+              <div class="row section-actions">
+                <button id="cc-refresh" type="button" data-i18n="cc.refresh_estimates">Refresh estimates</button>
+                <button id="cc-rebuild" type="button" data-i18n="cc.rebuild">Rebuild from history</button>
+                <button id="cc-save" type="button" data-i18n="cc.save">Save settings</button>
+              </div>
+            </div>
+            <div id="cc-body"></div>
           </div>
         </section>
 
@@ -718,6 +736,7 @@
       /*ai-balances.js*/
       /*ai-providers.js*/
       /*account.js*/
+      /*cc.js*/
       /*app.js*/
     </script>
   </body>
