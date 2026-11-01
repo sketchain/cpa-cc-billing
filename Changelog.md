@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.1.0
+
+### 升级须知
+
+- 插件 ID 改为 `cpa-cc-billing`，显示名改为 CPA CC Billing，版本号从 v0.1.0 起独立编号；默认数据文件改为 `plugins/cpa-cc-billing-state-v1.db`。
+- 从 cpa-key-billing 迁移：停止 CPA，把原数据文件复制为新文件名，移除旧插件及其配置后安装本插件；原有数据全部保留，CC 分账所需的新表自动创建。
+- 管理和资源路由前缀改为 `/v0/management/plugins/cpa-cc-billing`、`/v0/resource/plugins/cpa-cc-billing`。
+
+### 后端
+
+- 新增 CC 分账：按 Claude 账号用请求花费和 5h/7d 用量响应头估算 5 小时与每周总额，滑动窗口剔除 CPA 外部用量，自动估算 k，冷启动时使用档位默认周总额。
+- 新增账号池：固定 key 预留订阅套餐 7 天窗口的未用额度，余量 key 只在池剩余额度超过周预留和 5h 预留时放行，被拦时 429 提示具体原因；余量 key 可设自身周上限。
+- 固定 key 的周周期自动对齐锚定账号的 7d 重置时间；提前重置时当前周期跑满原定时间，下个周期再对齐。
+- 新增 `/v0/resource/plugins/cpa-cc-billing/balance` 余额接口，返回 new-api 高级自定义渠道可识别的 `credit_summary`，余额 ≤ 0 时返回 1。
+- 新增 JSON 价格表批量导入自定义价格。
+- push 到 main 时按 Changelog 顶部版本自动打 tag 并发布全平台产物。
+
+### 前端
+
+- 新增「CC 分账」页：展示每个账号的用量、估算总额、k、剩余额度、冷启动状态和段统计，每个池的预留与余量余额，每个 key 的额度、已用、预留与余额；所有参数可在页面调整。
+- 模型定价卡片新增「导入 JSON」。
+
 ## v1.4.15
 
 ### 前端

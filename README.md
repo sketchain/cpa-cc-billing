@@ -1,17 +1,24 @@
 <div align="center">
-  <h1>CPA Key Billing</h1>
-  <p><strong><a href="https://github.com/router-for-me/CLIProxyAPI">CLIProxyAPI</a> 下游 API Key 计费与订阅额度插件。</strong></p>
+  <h1>CPA CC Billing</h1>
+  <p><strong>把一个 Claude 订阅账号按 CC 额度分给多个下游 API Key 的 <a href="https://github.com/router-for-me/CLIProxyAPI">CLIProxyAPI</a> 插件。</strong></p>
   <p>
-    <a href="https://github.com/haowang02/cpa-plugin-key-billing/releases/latest"><img src="https://img.shields.io/github/v/release/haowang02/cpa-plugin-key-billing?label=release" alt="Latest release"></a>
-    <a href="https://github.com/haowang02/cpa-plugin-key-billing/releases"><img src="https://img.shields.io/github/downloads/haowang02/cpa-plugin-key-billing/total" alt="Total downloads"></a>
+    <a href="https://github.com/sketchain/cpa-cc-billing/releases/latest"><img src="https://img.shields.io/github/v/release/sketchain/cpa-cc-billing?label=release" alt="Latest release"></a>
     <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platforms: Windows, macOS, and Linux">
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
   </p>
   <p><a href="./README.en.md">English</a> · <strong>简体中文</strong></p>
 </div>
-<img src="images/example.png" alt="cpa-plugin-key-billing example" width="100%" />
+
+基于 [cpa-key-billing](https://github.com/haowang02/cpa-plugin-key-billing) 修改。原插件的计费、订阅额度、并发、路由功能全部保留，在此基础上新增「CC 分账」。
+
+<img src="images/example.png" alt="CPA CC Billing example" width="100%" />
 
 ## 功能特性
+
+- **CC 分账**：固定 key 每周拿固定额度（例如 a 每周 $100），余量 key 只能用账号剩余的部分，并为固定 key 动态预留还没用掉的额度（周预留 + 5 小时预留）
+- 只用响应头里被动拿到的用量百分比估算账号总额（折合美元），不主动查询上游；自动剔除在 CPA 之外直接使用账号带来的污染
+- 给 new-api「高级自定义渠道」提供余额接口
+- 支持从 JSON 价格表批量导入自定义价格
 
 - 支持金额、Token、请求三种额度，可按 API Key 独立计时或按订阅计划统一周期重置
 - 模型定价和订阅计划可分别使用美元或人民币计价，统计页面可按任一币种显示
@@ -46,6 +53,112 @@ flowchart TB
     F --> G["归一化 Token 并计费<br/>更新周期消费额"]
 ```
 
+## CC 分账
+
+### 概念
+
+- **账号**：CPA 里的一个 Claude OAuth 凭证（按 `auth_index` 区分），每个账号独立估算。
+- **池**：一组账号。固定 key 和余量 key 都绑定到池；池的剩余 = 各账号剩余之和。池里第一个账号是「锚定账号」，池内 key 的周期和 5h 窗口都跟着它走。
+- **固定 key**：在 API Key 页绑定一个含 **7 天金额窗口** 的订阅套餐（原插件的订阅计划），窗口金额就是它每周的额度。
+- **余量 key**：没有固定额度，只能用池扣掉固定 key 预留后剩下的部分；可选填一个自己的周上限。
+
+### 估算方法
+
+Anthropic 响应头 `anthropic-ratelimit-unified-5h-utilization` / `7d-utilization` 只给整数百分比，插件按账号这样估算：
+
+1. **1% 段**：5h 用量每涨 1 格记一段，段的花费 = 这一格期间经过 CPA、走这个账号的所有请求花费之和（按插件现有计价）。响应头按请求开始时间记，花费按请求完成时间记；并发造成的乱序由「同一周期内用量只升不降」和 10 分钟乱序窗口处理（与上游 `quotaReorderHorizon` 一致）。每个大块第一次涨格之前的花费不计（对应的起点不足 1 格）。
+2. **大块**：相邻数据间隔不超过 5 分钟的段属于同一大块；5h 窗口重置时强制断开。
+3. **剔除污染**：在大块内用 8% 宽的窗口逐段滑动，窗口比值（涨幅% / 花费$）超出参照值 20% 就标为可疑；某段被覆盖它的窗口中有 ≥50% 可疑就剔除。参照值默认是全局历史加权平均，没有历史时退回本大块的迭代加权平均。外部用量只会让比值偏大，所以剔除只会让估算偏保守。不足一个窗口宽的大块整体和全局参照值比较。
+4. **全局平均**：各大块的干净比值按 `(干净涨幅)^p` 加权；最近 14 天的大块占 90%，更早的占 10%。`T_5h = 100 / 全局比值`。
+5. **k = 周总额 / 5h 总额**：用相邻两次响应之间 5h 和 7d 的涨幅配对累加（任一窗口在两次之间重置就跳过这一对），7d 累计涨够 10 个点后 `k = Σ5h涨幅 / Σ7d涨幅`。可以手动覆盖。`T_week = k × T_5h`。
+6. **冷启动**：干净大块少于 20 个时用档位默认周总额（Pro $250、Max 5x $1250、Max 20x $2500）。CPA 的 Claude 凭证文件里没有订阅档位，需要在页面上给每个账号手选（不选按 Pro 算）。冷启动时 `T_5h = 默认周总额 / k`；没有手动 k 且 k 还没估算出来时，5h 预留暂不启用。
+
+用合成数据（整数量化、并发乱序、零星和持续的外部用量、5h 重置）测试：干净数据下 T_5h 误差约 +0.3%，持续外部用量下约 −3%（偏保守），k 误差 < 1%。
+
+### 放行规则
+
+每个账号：
+
+- `R_week = s × T_week × (1 − u_7d)`，`R_5h = s × T_5h × (1 − u_5h)`，`s` 是安全折扣（默认 0.9）
+
+每个池：
+
+- `P_week = Σ 固定 key max(0, 周额度 − 本周期已用)`
+- 每个固定 key 的 5h 预留 = `max(0, min(周额度 / k − 本 5h 窗口已用, 本周剩余))`，`1/k` 这个比例可以按 key 手动覆盖
+- 余量 key 只在 `Σ R_week > P_week`，并且（5h 预留启用时）`Σ R_5h > Σ 5h 预留` 时放行
+- 被拦时返回原插件同样的 `429 rate_limit_error`，提示文字写明是被「weekly reservation」（周预留）、「5-hour reservation」（5h 预留）还是 key 自己的「weekly cap」拦下的，`Retry-After` 指向对应窗口的重置时间
+
+固定 key 自身只受它的订阅套餐限制，不会被池拦下。
+
+### 固定 key 的周期
+
+- 插件会把固定 key 所绑套餐的 7 天窗口自动改成「统一周期」，起点对齐锚定账号的 7d `reset_at`。滚动周期的套餐如果还有其他窗口，无法自动对齐（页面会提示）。
+- Anthropic 提前重置时（沿用上游 `QuotaWindowPeriods` 的提前重置检测）：当前周期不重置、已用额度不清零，跑到原定结束时间；下一个周期再对齐到账号新的 `reset_at`。
+- 没用完的额度到期作废，不转给余量 key。5h 预留跟随锚定账号的 5h 窗口。
+
+### 配置项
+
+全部在管理页面「CC 分账」里调整，保存在数据库里（不在 YAML 中）：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| 段保留天数 | 365 | 与 `request_event_retention_days` 互不影响 |
+| 大块间隔 | 5 分钟 | 修改后只影响新数据；需要作用于历史时点「从历史重建」 |
+| 滑动窗口宽度 | 8% | |
+| 参照值 | 全局历史 | 或「本大块迭代平均」 |
+| 可疑阈值 | 20% | |
+| 剔除票数比例 | 50% | |
+| 权重指数 p | 2 | |
+| 近期天数 / 近期占比 | 14 天 / 90% | |
+| k 所需 7d 涨幅 | 10 点 | |
+| 冷启动大块数 | 20 | |
+| 档位默认周总额 | Pro $250 / Max 5x $1250 / Max 20x $2500 | |
+| 安全折扣 s | 90% | |
+| 账号档位、手动 k | 未设置 / 自动 | 按账号 |
+| key 类型、池、5h 预留比例、余量 key 周上限 | — | 按 key |
+
+### 给 new-api 用的余额接口
+
+```text
+GET /v0/resource/plugins/cpa-cc-billing/balance
+Authorization: Bearer <下游 API Key>
+```
+
+返回 `{"object":"credit_summary","total_available": <美元>}`，只按周计算：固定 key = 周额度 − 本周期已用；余量 key = `Σ R_week − P_week`（填了周上限时再和「上限 − 已用」取小）。结果 ≤ 0 时一律返回 `1`，因为 new-api 在余额 ≤ 0 时会自动禁用渠道。没有加入池的 key 返回 404，无效 key 返回 401。
+
+new-api 配置（渠道类型选「高级自定义」）：
+
+1. 渠道的 Base URL 填 CPA 地址，例如 `https://cpa.example.com`，密钥填下游 API Key。
+2. 在高级路由（`advanced_routes`）里加一条余额路由：`incoming_path` 为 `/v1/dashboard/billing/credit_grants`（new-api 固定使用这个路径查询余额），`upstream_path` 为 `/v0/resource/plugins/cpa-cc-billing/balance`，转换器选「无」，鉴权保持默认（`Authorization: Bearer <渠道密钥>`）。
+
+   ```json
+   {
+     "advanced_routes": [
+       { "incoming_path": "/v1/dashboard/billing/credit_grants", "upstream_path": "/v0/resource/plugins/cpa-cc-billing/balance", "converter": "none" }
+     ]
+   }
+   ```
+
+3. 在渠道列表点「更新余额」即可。new-api 读到 `object = credit_summary` 且 `total_available` 为数字时直接显示为余额。
+
+### 导入价格表
+
+设置页「模型定价」卡片点「导入 JSON」。文件可以是数组，也可以是 `{"models": [...]}`，每项字段为 `name`、`aliases`、`input`、`output`、`cache_read`、`cache_write`（每百万 token 美元价），`name` 和每个别名都会写成一条自定义价，其他字段（例如阶梯价备注）忽略。也可以直接调用 `POST /v0/management/plugins/cpa-cc-billing/prices/import`。
+
+## 从 cpa-key-billing 迁移
+
+1. 停止 CLIProxyAPI，备份 `plugins/cpa-key-billing-state-v1.db`（连同同名的 `-wal`、`-shm` 文件，如果存在）。
+2. 复制为新文件名：
+
+   ```sh
+   cp plugins/cpa-key-billing-state-v1.db plugins/cpa-cc-billing-state-v1.db
+   # 如果存在 -wal / -shm，也一起复制并改成同样的前缀
+   ```
+
+3. 移除旧插件的动态库和 `plugins.configs.cpa-key-billing` 配置（两个插件同时启用会重复拦截和记账），安装本插件并加上 `plugins.configs.cpa-cc-billing`。
+4. 启动 CLIProxyAPI。原有的 Key、套餐、路由、价格和历史请求全部保留；CC 分账用的新表（`cc_meta`、`cc_segments`、`cc_streams`）会自动创建。原表结构版本不变，所以这个文件仍然可以被原插件打开。
+5. 打开「CC 分账」页，给账号选档位、建池、分配 key。插件会用保留期内的历史请求自动生成 1% 段，迁移后马上就有估算数据。
+
 ## 环境要求
 
 - CLIProxyAPI `7.3.7` 或更高版本，建议使用最新版本；[按路由规则过滤模型列表](#模型列表)需要 `8.0.37` 或更高版本
@@ -55,20 +168,20 @@ flowchart TB
 
 ### 商店安装
 
-CPA 管理面板（CPAMC 或 CPAMP）插件商店搜索 `cpa-key-billing`。
+CPA 管理面板（CPAMC 或 CPAMP）插件商店搜索 `cpa-cc-billing`。
 
 ### 人工安装
 
 在 CLIProxyAPI 根目录运行。macOS 和 Linux 使用：
 
 ```sh
-curl -LsSf https://raw.githubusercontent.com/haowang02/cpa-plugin-key-billing/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/sketchain/cpa-cc-billing/main/install.sh | sh
 ```
 
 Windows 请先停止 CLIProxyAPI，再在 PowerShell 中运行：
 
 ```powershell
-irm https://raw.githubusercontent.com/haowang02/cpa-plugin-key-billing/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/sketchain/cpa-cc-billing/main/install.ps1 | iex
 ```
 
 安装脚本会将插件安装到当前目录的 `plugins/`。安装或升级完成后需要重启 CLIProxyAPI。
@@ -80,7 +193,7 @@ plugins:
   enabled: true
   dir: "plugins"
   configs:
-    cpa-key-billing:
+    cpa-cc-billing:
       enabled: true
       priority: 100 # 插件调度优先级，数值越大越优先
       debug: false # 是否记录 debug 日志，例如路由日志、匹配参考价日志
@@ -90,7 +203,7 @@ plugins:
       mask_api_key_view_emails: false # 对 API Key 查询页面返回的邮箱进行掩码脱敏
       allow_api_key_quota_reset: false # 允许 API Key 用户重置可访问的 Codex 和 Claude 认证文件额度，消耗上游重置次数
       request_event_retention_days: 365 # 请求事件及关联错误事件的保留天数，正整数
-      state_file: "plugins/cpa-key-billing-state-v1.db"
+      state_file: "plugins/cpa-cc-billing-state-v1.db"
       routing:
         strategy: "round-robin" # round-robin、weighted-round-robin、fill-first
         session-affinity: false # 同一会话优先复用可用的上游凭证
@@ -106,23 +219,23 @@ CPA 按插件优先级选择调度插件，不会依次调用。建议显式设�
 > [!WARNING]
 > 升级前请备份数据文件。
 >
-> - v1.0.0 至最新版本的数据库文件支持自动迁移。
-> - v0.8.4 及更早版本的 JSON 或 SQLite 数据文件不支持迁移，请将 `state_file` 指向新文件。
+> - 可以直接使用 cpa-key-billing v1.0.0 及以后版本的数据库文件，见[从 cpa-key-billing 迁移](#从-cpa-key-billing-迁移)。
+> - cpa-key-billing v0.8.4 及更早版本的 JSON 或 SQLite 数据文件不支持迁移，请将 `state_file` 指向新文件。
 
-重启 CLIProxyAPI 后，在管理中心打开「CPA Key Billing」。确认模型定价后，创建订阅计划并绑定需要限制的 API Key。
+重启 CLIProxyAPI 后，在管理中心打开「CPA CC Billing」。确认模型定价后，创建订阅计划并绑定需要限制的 API Key。
 
 ## 页面访问
 
-管理员可以从 CLIProxyAPI 管理中心的「CPA Key Billing」菜单进入，也可以直接打开：
+管理员可以从 CLIProxyAPI 管理中心的「CPA CC Billing」菜单进入，也可以直接打开：
 
 ```text
-http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-key-billing/ui
+http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-cc-billing/ui
 ```
 
 普通用户使用自己的 API Key 查询订阅额度和用量时，直接打开：
 
 ```text
-http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-key-billing/ui#account
+http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-cc-billing/ui#account
 ```
 
 ## 计费与订阅规则
@@ -172,11 +285,12 @@ flowchart TB
 | --- | --- | --- | --- |
 | API Key 并发已满 | `429` | `rate_limit_error` | `rate_limit_exceeded` |
 | 订阅额度用尽 | `429` | `rate_limit_error` | `rate_limit_exceeded` |
+| 余量 key 被 CC 周预留 / 5h 预留 / 自身周上限拦下 | `429` | `rate_limit_error` | `rate_limit_exceeded` |
 | 模型无权访问 | `403` | `permission_error` | `insufficient_quota` |
 | 路由规则允许的凭证都不提供该模型，或当前都不可用 | `503` | `server_error` | `internal_server_error` |
 | 选中的凭证不符合路由规则 | `503` | `server_error` | `routing_credential_mismatch` |
 | 无法校验所选凭证的路由权限 | `503` | `server_error` | `routing_credential_unverified` |
-| 模型未定价且未开启 `allow_unpriced_models` | `503` | `cpa_key_billing_error` | `model_price_error` |
+| 模型未定价且未开启 `allow_unpriced_models` | `503` | `cpa_cc_billing_error` | `model_price_error` |
 
 ## 致谢
 
