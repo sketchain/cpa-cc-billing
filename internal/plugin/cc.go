@@ -134,6 +134,12 @@ func (h *ccHost) KeyInfo(scope string) (ccbilling.KeyInfo, bool) {
 		return ccbilling.KeyInfo{}, false
 	}
 	info := ccbilling.KeyInfo{Preview: view.Preview, Label: view.Label, PlanID: view.PlanID}
+	for _, plan := range h.app.store.Plans() {
+		if plan.ID == view.PlanID {
+			revision, _ := json.Marshal(plan)
+			info.PlanRevision = string(revision)
+		}
+	}
 	rate := h.app.store.Config().CNYPerUSD
 	for _, window := range view.Windows {
 		if window.PeriodSeconds != weekSeconds {

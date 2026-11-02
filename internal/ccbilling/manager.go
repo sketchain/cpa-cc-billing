@@ -24,6 +24,8 @@ type KeyInfo struct {
 	CycleEnd    time.Time
 	// Anchored reports whether the plan's cycles start at a fixed anchor.
 	Anchored bool
+	// PlanRevision changes whenever the key's plan does.
+	PlanRevision string
 }
 
 // Alignment is the outcome of keeping a plan's weekly window on an account's
@@ -135,7 +137,7 @@ type Manager struct {
 	seq    atomic.Uint64
 
 	alignMu    sync.Mutex
-	alignments map[string]Alignment
+	alignments map[string]alignmentEntry
 
 	lastError      atomic.Value
 	loggedUnloaded atomic.Bool
@@ -149,7 +151,7 @@ type Manager struct {
 
 func NewManager(host Host) *Manager {
 	m := &Manager{host: host, accounts: map[string]*accountCache{}, latest: map[string]Observation{},
-		deltas: map[string][]costDelta{}, alignments: map[string]Alignment{}, RefreshInterval: time.Minute, ProcessBudget: 3 * time.Second}
+		deltas: map[string][]costDelta{}, alignments: map[string]alignmentEntry{}, RefreshInterval: time.Minute, ProcessBudget: 3 * time.Second}
 	m.lastError.Store("")
 	return m
 }
@@ -181,7 +183,7 @@ func (m *Manager) SetSettings(next Settings) (Settings, error) {
 	}
 	m.settings = normalized
 	m.alignMu.Lock()
-	m.alignments = map[string]Alignment{}
+	m.alignments = map[string]alignmentEntry{}
 	m.alignMu.Unlock()
 	return normalized, m.refreshLocked()
 }
@@ -298,7 +300,7 @@ func (m *Manager) withDB(fn func(*sql.DB) error) error {
 			m.latest, m.deltas = map[string]Observation{}, map[string][]costDelta{}
 			m.liveMu.Unlock()
 			m.alignMu.Lock()
-			m.alignments = map[string]Alignment{}
+			m.alignments = map[string]alignmentEntry{}
 			m.alignMu.Unlock()
 		}
 		return fn(db)
@@ -609,10 +611,11 @@ func (m *Manager) alignFixed(snap *snapshot, scope string, pool Pool) Alignment 
 		return Alignment{Status: AlignUnknown}
 	}
 	cacheKey := key.info.PlanID + "\x00" + account.weekly.ResetAt.Format(time.RFC3339)
+	now := m.host.Now()
 	m.alignMu.Lock()
 	defer m.alignMu.Unlock()
-	if previous, ok := m.alignments[cacheKey]; ok && previous.Status == AlignAligned {
-		return previous
+	if previous, ok := m.alignments[cacheKey]; ok && previous.current(now, key.info.PlanRevision) {
+		return previous.result
 	}
 	result, err := m.host.AlignWeekly(key.info.PlanID, account.weekly.ResetAt)
 	if err != nil {
@@ -622,8 +625,29 @@ func (m *Manager) alignFixed(snap *snapshot, scope string, pool Pool) Alignment 
 	if result.Status == AlignChanged {
 		result.Status = AlignAligned
 	}
-	m.alignments[cacheKey] = result
+	m.alignments[cacheKey] = alignmentEntry{result: result, revision: key.info.PlanRevision}
 	return result
+}
+
+// alignmentEntry caches an alignment so fixed keys' requests do not ask the
+// store every time: an aligned plan stays aligned for that reset, a waiting
+// one until its running cycles end, and an unsupported one until its plan or
+// the settings change.
+type alignmentEntry struct {
+	result   Alignment
+	revision string
+}
+
+func (e alignmentEntry) current(now time.Time, revision string) bool {
+	switch e.result.Status {
+	case AlignAligned:
+		return true
+	case AlignWaiting:
+		return now.Before(e.result.WaitUntil)
+	case AlignUnsupported:
+		return e.revision == revision
+	}
+	return false
 }
 
 // Admit decides whether the key may send a request now. Keys outside every

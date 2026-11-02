@@ -22,6 +22,11 @@ type fakeHost struct {
 	gate    atomic.Pointer[chan struct{}]
 	entered chan struct{}
 	keys    map[string]KeyInfo
+	// weekly and align configure WeeklyPeriod and AlignWeekly; aligns counts
+	// AlignWeekly calls.
+	weekly *WeeklyPeriod
+	align  Alignment
+	aligns atomic.Int64
 }
 
 func newFakeHost(t *testing.T) *fakeHost {
@@ -57,6 +62,9 @@ func (h *fakeHost) LatestObservations([]string, time.Time) (map[string]Observati
 }
 func (h *fakeHost) WeeklyPeriod(string, time.Time) (WeeklyPeriod, bool, error) {
 	h.calls.Add(1)
+	if h.weekly != nil {
+		return *h.weekly, true, nil
+	}
 	return WeeklyPeriod{}, false, nil
 }
 func (h *fakeHost) KeyInfo(scope string) (KeyInfo, bool) {
@@ -70,7 +78,11 @@ func (h *fakeHost) KeyUsageUSD(string, time.Time, time.Time) (float64, error) {
 }
 func (h *fakeHost) AlignWeekly(string, time.Time) (Alignment, error) {
 	h.calls.Add(1)
-	return Alignment{Status: AlignAligned}, nil
+	h.aligns.Add(1)
+	if h.align.Status == "" {
+		return Alignment{Status: AlignAligned}, nil
+	}
+	return h.align, nil
 }
 func (h *fakeHost) Logf(string, ...any) {}
 
@@ -248,5 +260,75 @@ func TestUpgradeRebuildsKEvidenceAndKeepsSegments(t *testing.T) {
 	k := manager.snap.Load().accounts["a1"].k
 	if k.K == nil || math.Abs(*k.K-6) > 0.6 {
 		t.Fatalf("rebuilt k = %+v", k)
+	}
+}
+
+func TestAlignmentResultsAreCached(t *testing.T) {
+	manager, host := configuredManager(t)
+	host.weekly = &WeeklyPeriod{Start: host.now.Add(-24 * time.Hour), ResetAt: host.now.Add(6 * 24 * time.Hour)}
+	waitUntil := host.now.Add(2 * time.Hour)
+	host.align = Alignment{Status: AlignWaiting, WaitUntil: waitUntil}
+	host.keys["fixed"] = KeyInfo{PlanID: "plan", HasWeekly: true, WeeklyUSD: 100, PlanRevision: "r1",
+		CycleStart: host.now.Add(-time.Hour), CycleEnd: waitUntil}
+	if err := manager.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	admitFixed := func(times int) {
+		for range times {
+			if decision := manager.Admit("fixed"); !decision.Allowed {
+				t.Fatalf("fixed key refused: %+v", decision)
+			}
+		}
+	}
+
+	// Waiting: asked once, then cached until the running cycle ends.
+	admitFixed(5)
+	if calls := host.aligns.Load(); calls != 1 {
+		t.Fatalf("waiting: AlignWeekly calls = %d, want 1", calls)
+	}
+	host.now = waitUntil
+	host.align = Alignment{Status: AlignAligned}
+	admitFixed(5)
+	if calls := host.aligns.Load(); calls != 2 {
+		t.Fatalf("after the wait: AlignWeekly calls = %d, want 2", calls)
+	}
+
+	// Unsupported: cached until the plan changes or the settings are saved.
+	manager2, host2 := configuredManager(t)
+	host2.weekly = &WeeklyPeriod{Start: host2.now.Add(-24 * time.Hour), ResetAt: host2.now.Add(6 * 24 * time.Hour)}
+	host2.align = Alignment{Status: AlignUnsupported}
+	host2.keys["fixed"] = KeyInfo{PlanID: "plan", HasWeekly: true, WeeklyUSD: 100, PlanRevision: "r1",
+		CycleStart: host2.now.Add(-time.Hour), CycleEnd: host2.now.Add(48 * time.Hour)}
+	if err := manager2.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		manager2.Admit("fixed")
+	}
+	host2.now = host2.now.Add(24 * time.Hour)
+	if err := manager2.Refresh(); err != nil { // same plan revision
+		t.Fatal(err)
+	}
+	manager2.Admit("fixed")
+	if calls := host2.aligns.Load(); calls != 1 {
+		t.Fatalf("unsupported: AlignWeekly calls = %d, want 1", calls)
+	}
+	info := host2.keys["fixed"]
+	info.PlanRevision = "r2"
+	host2.keys["fixed"] = info
+	if err := manager2.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	manager2.Admit("fixed")
+	if calls := host2.aligns.Load(); calls != 2 {
+		t.Fatalf("after a plan change: AlignWeekly calls = %d, want 2", calls)
+	}
+	settings, _ := manager2.Settings()
+	if _, err := manager2.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	manager2.Admit("fixed")
+	if calls := host2.aligns.Load(); calls != 3 {
+		t.Fatalf("after saving settings: AlignWeekly calls = %d, want 3", calls)
 	}
 }

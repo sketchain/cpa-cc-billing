@@ -374,3 +374,32 @@ func sqliteUserVersion(t *testing.T, path string) int {
 	}
 	return version
 }
+
+// Configuration builds the first snapshot, so after a restart remainder keys
+// are held to the reservations before any request has completed.
+func TestCCRestartAppliesReservationsBeforeTheFirstUsage(t *testing.T) {
+	app, clock := newCCTestApp(t)
+	reset5h, reset7d := clock.now.Add(3*time.Hour), clock.now.Add(4*24*time.Hour)
+	ccUsage(t, app, ccRemainderKey, 0.5, 0.10, 0.92, reset5h, reset7d)
+	if response := ccAdmit(t, app, ccRemainderKey); !response.Terminate {
+		t.Fatal("remainder key admitted before the restart")
+	}
+	path := app.store.Config().StateFile
+	app.Shutdown()
+
+	restarted := newTestApp(t)
+	t.Cleanup(restarted.Shutdown)
+	restarted.store.SetClock(clock.Now)
+	if _, err := restarted.HandleMethod(MethodPluginRegister, mustMarshal(t, LifecycleRequest{
+		ConfigYAML: []byte("enabled: true\nstate_file: \"" + path + "\"\n"),
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if !restarted.cc.Loaded() {
+		t.Fatal("configuration did not build a snapshot")
+	}
+	response := ccAdmit(t, restarted, ccRemainderKey)
+	if !response.Terminate || !strings.Contains(refusalMessage(t, response), "weekly reservation") {
+		t.Fatalf("remainder key after restart = %+v", response)
+	}
+}
