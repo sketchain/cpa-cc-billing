@@ -20,14 +20,13 @@ type AccountStatus struct {
 	AuthIndex string `json:"auth_index"`
 	Tier      string `json:"tier"`
 	Estimate
-	KAuto      *float64 `json:"k_auto,omitempty"`
-	KManual    *float64 `json:"k_manual,omitempty"`
-	K          *float64 `json:"k,omitempty"`
-	KSource    string   `json:"k_source"`
-	KSum5h     float64  `json:"k_sum_5h"`
-	KSum7d     float64  `json:"k_sum_7d"`
-	ColdStart  bool     `json:"cold_start"`
-	TotalsFrom string   `json:"totals_from"`
+	KAuto      *float64  `json:"k_auto,omitempty"`
+	KManual    *float64  `json:"k_manual,omitempty"`
+	K          *float64  `json:"k,omitempty"`
+	KSource    string    `json:"k_source"`
+	KEstimate  KEstimate `json:"k_estimate"`
+	ColdStart  bool      `json:"cold_start"`
+	TotalsFrom string    `json:"totals_from"`
 	// FiveHourTotal and WeeklyTotal are the effective totals in USD. A zero
 	// FiveHourTotal means it is unknown, which disables 5-hour reservations.
 	FiveHourTotal float64 `json:"five_hour_total_usd"`
@@ -45,15 +44,13 @@ type AccountStatus struct {
 }
 
 // ResolveAccount combines an account's estimate, k evidence and latest report.
-func ResolveAccount(authIndex string, settings AccountSettings, estimate Estimate, stream StreamState, latest Observation, params Params, now time.Time) AccountStatus {
+func ResolveAccount(authIndex string, settings AccountSettings, estimate Estimate, k KEstimate, latest Observation, params Params, now time.Time) AccountStatus {
 	status := AccountStatus{AuthIndex: authIndex, Tier: settings.Tier, Estimate: estimate, KManual: settings.ManualK,
-		KSum5h: stream.KSum5h, KSum7d: stream.KSum7d, KSource: SourceNone, ObservedAt: latest.At}
+		KEstimate: k, KSource: SourceNone, ObservedAt: latest.At}
 	if status.Tier == "" {
 		status.Tier = TierPro
 	}
-	if k, ok := stream.KAuto(params); ok {
-		status.KAuto = &k
-	}
+	status.KAuto = k.K
 	switch {
 	case settings.ManualK != nil:
 		status.K, status.KSource = settings.ManualK, SourceManual

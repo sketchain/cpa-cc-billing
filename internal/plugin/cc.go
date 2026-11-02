@@ -179,7 +179,19 @@ func (h *ccHost) Logf(format string, args ...any) {
 	h.app.store.AddPluginLog(billing.PluginLogError, format, args...)
 }
 
-func newCCManager(app *App) *ccbilling.Manager { return ccbilling.NewManager(&ccHost{app: app}) }
+func newCCManager(app *App) *ccbilling.Manager {
+	manager := ccbilling.NewManager(&ccHost{app: app})
+	app.store.SetUsageObserver(manager.ObserveCost)
+	return manager
+}
+
+// ccConfigured loads the CC estimates when the plugin is configured, so
+// admission has a snapshot before traffic arrives.
+func (a *App) ccConfigured() {
+	if a.cc != nil {
+		_ = a.cc.Refresh()
+	}
+}
 
 // ccObservation reads the unified Claude windows of a quota report.
 func ccObservation(report billing.QuotaReport, at time.Time) (ccbilling.Observation, bool) {
@@ -211,6 +223,14 @@ func (a *App) ccObserve(authIndex string, report *billing.QuotaReport, at time.T
 	}
 	if obs, ok := ccObservation(*report, at); ok {
 		a.cc.Observe(authIndex, obs)
+	}
+}
+
+// ccAfterUsage refreshes the estimates from usage.handle, which runs after the
+// client's request has completed. It never waits for a running refresh.
+func (a *App) ccAfterUsage() {
+	if a.cc != nil {
+		a.cc.MaybeRefresh()
 	}
 }
 
@@ -322,9 +342,14 @@ func (a *App) ccBalance(_ ManagementRequest, access viewAccess) ManagementRespon
 	if !access.Tracked {
 		return apiKeyUnauthorized()
 	}
-	balance, ok := a.cc.Balance(access.Scope)
-	if !ok {
+	balance, status := a.cc.Balance(access.Scope)
+	switch status {
+	case ccbilling.BalanceUnassigned:
 		return apiKeyJSONError(http.StatusNotFound, "not_found", "This API key is not assigned to a CC pool")
+	case ccbilling.BalanceNotReady:
+		response := apiKeyJSONError(http.StatusServiceUnavailable, "not_ready", "CC estimates are still loading; retry shortly")
+		response.Headers.Set("Retry-After", "60")
+		return response
 	}
 	return apiKeyJSON(http.StatusOK, map[string]any{"object": "credit_summary", "total_available": ccbilling.ReportedBalance(balance)})
 }

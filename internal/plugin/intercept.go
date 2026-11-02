@@ -272,6 +272,7 @@ func (a *App) handleUsage(raw []byte) ([]byte, error) {
 		a.store.RecordUsage(event)
 	}
 	a.ccObserve(record.AuthIndex, event.Quota, record.RequestedAt)
+	a.ccAfterUsage()
 	a.observeCredentialUsage(record.AuthIndex, record.AuthType, event.Account)
 	return OKEnvelope(struct{}{})
 }

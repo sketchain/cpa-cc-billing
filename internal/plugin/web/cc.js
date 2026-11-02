@@ -154,11 +154,22 @@ function ccAccountsSection(data, draft) {
       : view.cold_start
         ? ccTag(m("cc.cold_start"), "warn", m("cc.cold_start_tip", { v0: view.clean_blocks, v1: draft.params.cold_start_blocks }))
         : ccTag(m("cc.estimated"), "ok");
-    const kText = view
+    const kGroup = (label, group) =>
+      el("div", {
+        class: group.valid ? "" : "muted",
+        text: m(label, { v0: group.k > 0 ? ccNumber(group.k) : "—", v1: ccNumber(group.gain_5h, 0), v2: ccNumber(group.gain_7d, 0) }),
+        tooltip: group.valid ? "" : m("cc.k_group_insufficient", { v0: draft.params.k_min_weekly_points })
+      });
+    const kCell = view
       ? [
-          m("cc.k_auto_value", { v0: view.k_auto ? ccNumber(view.k_auto) : "—" }),
-          m("cc.k_used_value", { v0: view.k ? ccNumber(view.k) : "—" })
-        ].join(DISPLAY_SEPARATOR)
+          kGroup("cc.k_recent_value", view.k_estimate.recent),
+          kGroup("cc.k_old_value", view.k_estimate.old),
+          el("div", {
+            class: "cc-k-final",
+            text: m("cc.k_used_value", { v0: view.k ? ccNumber(view.k) : "—" }) + DISPLAY_SEPARATOR + m("cc.k_source_" + view.k_source),
+            tooltip: m("cc.k_basis_" + view.k_estimate.basis)
+          })
+        ]
       : "—";
     return el(
       "tr",
@@ -191,10 +202,7 @@ function ccAccountsSection(data, draft) {
       }),
       el("td", { text: view ? (view.five_hour_total_usd > 0 ? ccUSD(view.five_hour_total_usd) : m("cc.unknown")) : "—" }),
       el("td", { text: view ? ccUSD(view.weekly_total_usd) : "—", tooltip: view ? m("cc.totals_from_" + view.totals_from) : "" }),
-      el("td", {
-        text: kText,
-        tooltip: view ? m("cc.k_evidence_tip", { v0: ccNumber(view.k_sum_5h, 0), v1: ccNumber(view.k_sum_7d, 0) }) : ""
-      }),
+      el("td", { class: "cc-k" }, kCell),
       el("td", { text: view ? ccUSD(view.remaining_week_usd) + DISPLAY_SLASH + ccUSD(view.remaining_five_hour_usd) : "—" }),
       el("td", { text: view ? m("cc.blocks_value", { v0: view.clean_blocks, v1: view.total_blocks }) : "—" }),
       el("td", { text: view ? m("cc.segments_value", { v0: view.segments - view.excluded_segments, v1: view.excluded_segments }) : "—" }),

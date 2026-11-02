@@ -1,0 +1,252 @@
+package ccbilling
+
+import (
+	"database/sql"
+	"math"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+)
+
+// fakeHost serves a real SQLite database with the billing tables the manager
+// reads, counts every call, and can hold WithDB to imitate a long backfill.
+type fakeHost struct {
+	db    *sql.DB
+	now   time.Time
+	calls atomic.Int64
+	// gate, when set, blocks WithDB until it is closed.
+	gate    atomic.Pointer[chan struct{}]
+	entered chan struct{}
+	keys    map[string]KeyInfo
+}
+
+func newFakeHost(t *testing.T) *fakeHost {
+	t.Helper()
+	db, err := sql.Open("sqlite3", filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`
+		CREATE TABLE request_events (id INTEGER PRIMARY KEY, at INTEGER, auth_index TEXT, latency_ms INTEGER, total_cost REAL, currency TEXT);
+		CREATE TABLE quota_report_windows (request_event_id INTEGER, limit_key TEXT, seconds INTEGER, auth_index TEXT, provider TEXT,
+			at INTEGER, used_percent REAL, reset_at INTEGER);`); err != nil {
+		t.Fatal(err)
+	}
+	return &fakeHost{db: db, now: time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC), entered: make(chan struct{}, 16), keys: map[string]KeyInfo{}}
+}
+
+func (h *fakeHost) WithDB(fn func(*sql.DB) error) error {
+	h.calls.Add(1)
+	if gate := h.gate.Load(); gate != nil {
+		h.entered <- struct{}{}
+		<-*gate
+	}
+	return fn(h.db)
+}
+func (h *fakeHost) Now() time.Time                         { h.calls.Add(1); return h.now }
+func (h *fakeHost) ToUSD(amount float64, _ string) float64 { return amount }
+func (h *fakeHost) LatestObservations([]string, time.Time) (map[string]Observation, error) {
+	h.calls.Add(1)
+	return map[string]Observation{}, nil
+}
+func (h *fakeHost) WeeklyPeriod(string, time.Time) (WeeklyPeriod, bool, error) {
+	h.calls.Add(1)
+	return WeeklyPeriod{}, false, nil
+}
+func (h *fakeHost) KeyInfo(scope string) (KeyInfo, bool) {
+	h.calls.Add(1)
+	info, ok := h.keys[scope]
+	return info, ok
+}
+func (h *fakeHost) KeyUsageUSD(string, time.Time, time.Time) (float64, error) {
+	h.calls.Add(1)
+	return 0, nil
+}
+func (h *fakeHost) AlignWeekly(string, time.Time) (Alignment, error) {
+	h.calls.Add(1)
+	return Alignment{Status: AlignAligned}, nil
+}
+func (h *fakeHost) Logf(string, ...any) {}
+
+func configuredManager(t *testing.T) (*Manager, *fakeHost) {
+	t.Helper()
+	host := newFakeHost(t)
+	host.keys["fixed"] = KeyInfo{PlanID: "plan", HasWeekly: true, WeeklyUSD: 100, CycleStart: host.now.Add(-time.Hour), CycleEnd: host.now.Add(48 * time.Hour)}
+	host.keys["remainder"] = KeyInfo{}
+	manager := NewManager(host)
+	manager.RefreshInterval = 0
+	settings := DefaultSettings()
+	settings.Pools = []Pool{{ID: "p", AuthIndexes: []string{"a1"}}}
+	settings.Keys["fixed"] = KeySettings{Kind: KeyFixed, PoolID: "p"}
+	settings.Keys["remainder"] = KeySettings{Kind: KeyRemainder, PoolID: "p"}
+	if _, err := manager.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	manager.Observe("a1", Observation{At: host.now, Has7d: true, Used7d: 95, Reset7d: host.now.Add(48 * time.Hour)})
+	return manager, host
+}
+
+func TestAdmissionIsNotBlockedByARunningRefresh(t *testing.T) {
+	manager, host := configuredManager(t)
+	gate := make(chan struct{})
+	host.gate.Store(&gate)
+	refreshed := make(chan struct{})
+	go func() {
+		defer close(refreshed)
+		_ = manager.Refresh() // holds the refresh lock while "backfilling"
+	}()
+	<-host.entered
+
+	var wg sync.WaitGroup
+	start := time.Now()
+	decisions := make([]Decision, 64)
+	for i := range decisions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			switch i % 4 {
+			case 0:
+				decisions[i] = manager.Admit("unassigned")
+			case 1:
+				decisions[i] = manager.Admit("fixed")
+			case 2:
+				decisions[i] = manager.Admit("remainder")
+			default:
+				manager.MaybeRefresh() // a usage callback during the backfill skips it
+				manager.ObserveCost("fixed", host.now, 1)
+				decisions[i] = manager.Admit("remainder")
+			}
+		}()
+	}
+	wg.Wait()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("admission waited %v for the refresh", elapsed)
+	}
+	select {
+	case <-refreshed:
+		t.Fatal("the refresh finished before the gate opened")
+	default:
+	}
+	for i, decision := range decisions {
+		wantAllowed := i%4 == 0 || i%4 == 1
+		if decision.Allowed != wantAllowed {
+			t.Fatalf("decision %d = %+v", i, decision)
+		}
+		if !wantAllowed && decision.Reason != RefusedWeekly {
+			t.Fatalf("decision %d reason = %q", i, decision.Reason)
+		}
+	}
+	close(gate)
+	<-refreshed
+	host.gate.Store(nil)
+}
+
+func TestUnassignedKeysNeverTouchTheEstimator(t *testing.T) {
+	manager, host := configuredManager(t)
+	before := host.calls.Load()
+	for range 100 {
+		if decision := manager.Admit("unassigned"); !decision.Allowed {
+			t.Fatalf("unassigned key refused: %+v", decision)
+		}
+		if _, status := manager.Balance("unassigned"); status != BalanceUnassigned {
+			t.Fatalf("unassigned balance status = %d", status)
+		}
+		manager.ObserveCost("unassigned", host.now, 1)
+	}
+	if after := host.calls.Load(); after != before {
+		t.Fatalf("unassigned keys made %d host calls", after-before)
+	}
+}
+
+func TestAdmissionBeforeTheFirstSnapshotAdmits(t *testing.T) {
+	host := newFakeHost(t)
+	manager := NewManager(host)
+	if decision := manager.Admit("anything"); !decision.Allowed {
+		t.Fatalf("decision = %+v", decision)
+	}
+	if _, status := manager.Balance("anything"); status != BalanceNotReady {
+		t.Fatalf("balance status = %d", status)
+	}
+}
+
+func TestLiveCostsReachFixedKeyUsageWithoutARefresh(t *testing.T) {
+	manager, host := configuredManager(t)
+	manager.Observe("a1", Observation{At: host.now, Has5h: true, Used5h: 10, Reset5h: host.now.Add(time.Hour)})
+	manager.RefreshInterval = time.Hour
+	if err := manager.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	manager.ObserveCost("fixed", host.now, 30)
+	manager.MaybeRefresh() // throttled: the snapshot stays
+	balance, status := manager.Balance("fixed")
+	if status != BalanceOK || balance != 70 {
+		t.Fatalf("fixed balance = %v (%d)", balance, status)
+	}
+	// A refresh that reads the stored usage drops the delta it covers.
+	host.keys["fixed"] = KeyInfo{PlanID: "plan", HasWeekly: true, WeeklyUSD: 100, UsedWeekUSD: 30, CycleStart: host.now.Add(-time.Hour), CycleEnd: host.now.Add(48 * time.Hour)}
+	if err := manager.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if balance, _ := manager.Balance("fixed"); balance != 70 {
+		t.Fatalf("fixed balance after refresh = %v", balance)
+	}
+}
+
+// Version 1 streams summed k from the start; upgrading rebuilds bucketed k
+// evidence from the retained reports and keeps the segments as they are.
+func TestUpgradeRebuildsKEvidenceAndKeepsSegments(t *testing.T) {
+	host := newFakeHost(t)
+	start := host.now.Add(-48 * time.Hour)
+	reset5, reset7 := start.Add(5*time.Hour), start.Add(6*24*time.Hour)
+	for i := 0; i < 240; i++ {
+		at := start.Add(time.Duration(i) * time.Minute)
+		used5, used7 := float64(i/2), float64(i/12)
+		for _, row := range []struct {
+			seconds int64
+			used    float64
+			reset   time.Time
+		}{{18000, used5, reset5}, {604800, used7, reset7}} {
+			if _, err := host.db.Exec(`INSERT INTO quota_report_windows VALUES (?, 'unified', ?, 'a1', 'claude', ?, ?, ?)`,
+				i, row.seconds, nanos(at), row.used, nanos(row.reset)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := host.db.Exec(ccMigrations[0]); err != nil {
+		t.Fatal(err)
+	}
+	settings := DefaultSettings()
+	settings.Pools = []Pool{{ID: "p", AuthIndexes: []string{"a1"}}}
+	raw := `{"params":{"segment_retention_days":365,"block_gap_minutes":5,"window_percent":8,"reference_mode":"global","suspicious_threshold":0.2,` +
+		`"exclude_vote_share":0.5,"weight_power":2,"recent_days":14,"recent_share":0.9,"k_min_weekly_points":10,"cold_start_blocks":20,` +
+		`"tier_weekly_usd":{"pro":250,"max5x":1250,"max20x":2500},"safety_factor":0.9},"pools":[{"id":"p","name":"","auth_indexes":["a1"]}],"accounts":{},"keys":{}}`
+	cursor := host.now.Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	if _, err := host.db.Exec(`CREATE TABLE cc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+		INSERT INTO cc_meta VALUES ('schema_version', '1'), ('settings', ?);
+		INSERT INTO cc_streams VALUES ('a1', ?);
+		INSERT INTO cc_segments (auth_index, block_at, at, cost_usd, gain) VALUES ('a1', ?, ?, 0.5, 1), ('a1', ?, ?, 0.4, 1);`,
+		raw, `{"cursor":"`+cursor+`","k_sum_5h":999,"k_sum_7d":1}`, nanos(start), nanos(start.Add(time.Minute)), nanos(start), nanos(start.Add(2*time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(host)
+	if err := manager.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	var segments, buckets int
+	if err := host.db.QueryRow(`SELECT (SELECT count(*) FROM cc_segments), (SELECT count(*) FROM cc_k_buckets)`).Scan(&segments, &buckets); err != nil {
+		t.Fatal(err)
+	}
+	if segments != 2 || buckets == 0 {
+		t.Fatalf("segments = %d, k buckets = %d", segments, buckets)
+	}
+	k := manager.snap.Load().accounts["a1"].k
+	if k.K == nil || math.Abs(*k.K-6) > 0.6 {
+		t.Fatalf("rebuilt k = %+v", k)
+	}
+}

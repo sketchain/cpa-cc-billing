@@ -128,10 +128,9 @@ type StreamState struct {
 	// covers an unknown fraction of a point and is discarded.
 	Armed   bool    `json:"armed"`
 	AccCost float64 `json:"acc_cost"`
-	// k evidence: 5-hour and 7-day gains between consecutive reports in which
-	// neither window reset, so outside usage raises both alike.
-	KSum5h float64 `json:"k_sum_5h"`
-	KSum7d float64 `json:"k_sum_7d"`
+	// K follows the same reports for k evidence with its own cursor, so k can
+	// be rebuilt from history without touching the segments.
+	K KStream `json:"k"`
 }
 
 func (s *StreamState) breakBlock() {
@@ -185,17 +184,12 @@ func (s *StreamState) Advance(observations []Observation, costs []CostEvent, unt
 			continue
 		}
 		obs := event.obs
-		step5, delta5, step7, delta7 := stepStale, 0.0, stepStale, 0.0
-		known5, known7 := s.FiveHour.Known, s.Weekly.Known
+		step5, delta5 := stepStale, 0.0
 		if obs.Has5h {
 			step5, delta5 = s.FiveHour.observe(obs.At, obs.Used5h, obs.Reset5h)
 		}
 		if obs.Has7d {
-			step7, delta7 = s.Weekly.observe(obs.At, obs.Used7d, obs.Reset7d)
-		}
-		if step5 == stepSame && step7 == stepSame && known5 && known7 {
-			s.KSum5h += delta5
-			s.KSum7d += delta7
+			s.Weekly.observe(obs.At, obs.Used7d, obs.Reset7d)
 		}
 		switch step5 {
 		case stepNewPeriod:
@@ -218,11 +212,47 @@ func (s *StreamState) Advance(observations []Observation, costs []CostEvent, unt
 
 func roundGain(value float64) float64 { return math.Round(value*1e6) / 1e6 }
 
-// KAuto returns the estimated weekly/5-hour ratio once enough 7-day gain has
-// accumulated.
-func (s StreamState) KAuto(params Params) (float64, bool) {
-	if s.KSum7d < params.KMinWeeklyPoints || s.KSum5h <= 0 {
-		return 0, false
+// KStream turns an account's reports into k evidence: the 5-hour and 7-day
+// gains between consecutive reports in which neither window reset, so outside
+// usage raises both alike.
+type KStream struct {
+	Cursor   time.Time   `json:"cursor,omitzero"`
+	FiveHour windowTrack `json:"five_hour"`
+	Weekly   windowTrack `json:"weekly"`
+}
+
+// KEvidence is the paired gain one report added.
+type KEvidence struct {
+	At     time.Time
+	Gain5h float64
+	Gain7d float64
+}
+
+// Advance consumes the reports after the cursor and no later than until.
+func (k *KStream) Advance(observations []Observation, until time.Time) []KEvidence {
+	selected := make([]Observation, 0, len(observations))
+	for _, obs := range observations {
+		if obs.At.After(k.Cursor) && !obs.At.After(until) {
+			selected = append(selected, obs)
+		}
 	}
-	return s.KSum5h / s.KSum7d, true
+	sort.SliceStable(selected, func(i, j int) bool { return selected[i].At.Before(selected[j].At) })
+	var evidence []KEvidence
+	for _, obs := range selected {
+		step5, delta5, step7, delta7 := stepStale, 0.0, stepStale, 0.0
+		known5, known7 := k.FiveHour.Known, k.Weekly.Known
+		if obs.Has5h {
+			step5, delta5 = k.FiveHour.observe(obs.At, obs.Used5h, obs.Reset5h)
+		}
+		if obs.Has7d {
+			step7, delta7 = k.Weekly.observe(obs.At, obs.Used7d, obs.Reset7d)
+		}
+		if step5 == stepSame && step7 == stepSame && known5 && known7 && (delta5 > gainEpsilon || delta7 > gainEpsilon) {
+			evidence = append(evidence, KEvidence{At: obs.At, Gain5h: delta5, Gain7d: delta7})
+		}
+	}
+	if until.After(k.Cursor) {
+		k.Cursor = until
+	}
+	return evidence
 }

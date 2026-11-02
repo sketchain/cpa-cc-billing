@@ -137,6 +137,7 @@ func (a *App) configure(raw []byte) error {
 	a.authModelsSupported.Store(a.probeHostAuthModels())
 	// Refresh records its result; a download failure does not disable custom prices.
 	_, _ = a.store.EnsureReferencePrices()
+	a.ccConfigured()
 	return nil
 }
 

@@ -811,9 +811,7 @@
   "cc.totals_from_estimated": "来自估算值",
   "cc.unknown": "未知",
   "cc.k": "k",
-  "cc.k_auto_value": "自动 {v0}",
   "cc.k_used_value": "采用 {v0}",
-  "cc.k_evidence_tip": "配对涨幅：5 小时 {v0} 点，7 天 {v1} 点",
   "cc.remaining_week_5h": "R 周 / R 5h",
   "cc.clean_blocks": "干净 / 全部大块",
   "cc.blocks_value": "{v0} / {v1}",
@@ -910,5 +908,16 @@
   "cc.block_reference": "参照值",
   "cc.import_prices": "导入 JSON",
   "cc.price_import_invalid": "文件不是有效的 JSON",
-  "cc.price_import_done": "已导入 {v0} 个模型，共 {v1} 个模型 ID"
+  "cc.price_import_done": "已导入 {v0} 个模型，共 {v1} 个模型 ID",
+  "cc.k_recent_value": "近期：{v0}（{v1} / {v2} 点）",
+  "cc.k_old_value": "更早：{v0}（{v1} / {v2} 点）",
+  "cc.k_group_insufficient": "这一组的 7d 涨幅不足 {v0} 点，不单独生效",
+  "cc.k_source_manual": "手动",
+  "cc.k_source_auto": "估算",
+  "cc.k_source_none": "无",
+  "cc.k_basis_blend": "两组都有效，按近期占比合并",
+  "cc.k_basis_recent": "只有近期组有效",
+  "cc.k_basis_old": "只有更早组有效",
+  "cc.k_basis_total": "两组单独都不够，使用合计比值",
+  "cc.k_basis_none": "7d 涨幅不足，暂无 k"
 }

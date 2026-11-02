@@ -98,8 +98,11 @@ const (
 
 // run simulates days of sessions: each day a few busy sessions of
 // concurrent requests separated by idle gaps.
-func (s *simulation) run(days int, kind contamination) {
-	for day := 0; day < days; day++ {
+func (s *simulation) run(days int, kind contamination) { s.runDays(0, days, kind) }
+
+// runDays simulates days first to first+days-1.
+func (s *simulation) runDays(first, days int, kind contamination) {
+	for day := first; day < first+days; day++ {
 		dayStart := s.start.Add(time.Duration(day) * 24 * time.Hour)
 		for session := 0; session < 3; session++ {
 			at := dayStart.Add(time.Duration(session)*5*time.Hour + time.Duration(s.rng.Intn(30))*time.Minute)
@@ -127,7 +130,7 @@ func (s *simulation) run(days int, kind contamination) {
 			}
 		}
 	}
-	s.applyUntil(s.start.Add(time.Duration(days+30) * 24 * time.Hour))
+	s.applyUntil(s.start.Add(time.Duration(first+days) * 24 * time.Hour))
 }
 
 func (s *simulation) end(days int) time.Time {
@@ -319,24 +322,92 @@ func TestFiveHourResetAndGapsBreakBlocks(t *testing.T) {
 	}
 }
 
+// kFrom runs a k stream over the simulation in daily chunks.
+func kFrom(sim *simulation, until time.Time, params Params) []KBucket {
+	stream := KStream{Cursor: sim.start.Add(-time.Second)}
+	var evidence []KEvidence
+	for stream.Cursor.Before(until) {
+		end := stream.Cursor.Add(24 * time.Hour)
+		if end.After(until) {
+			end = until
+		}
+		evidence = append(evidence, stream.Advance(sim.obs, end)...)
+	}
+	return BucketEvidence(evidence)
+}
+
 func TestKEstimate(t *testing.T) {
 	params := DefaultParams()
 	const k = 6.0
 	sim := newSimulation(9, 40, k)
 	sim.run(12, sporadicOutside)
-	state, _ := process(t, sim, sim.end(13), 24*time.Hour, params)
-	estimated, ok := state.KAuto(params)
-	if !ok {
-		t.Fatalf("k not estimated: 5h %.1f, 7d %.1f", state.KSum5h, state.KSum7d)
+	estimate := EstimateK(kFrom(sim, sim.end(13), params), params, sim.end(13))
+	if estimate.K == nil || estimate.Basis != KBasisRecent {
+		t.Fatalf("k not estimated: %+v", estimate)
 	}
-	if err := relativeError(estimated, k); math.Abs(err) > 0.12 {
-		t.Fatalf("k = %.2f, truth %.2f (sums %.1f / %.1f)", estimated, k, state.KSum5h, state.KSum7d)
+	if err := relativeError(*estimate.K, k); math.Abs(err) > 0.03 {
+		t.Fatalf("k = %.3f, truth %.2f (%+v)", *estimate.K, k, estimate)
 	}
-	var early StreamState
-	early.Cursor = sim.start.Add(-time.Second)
-	early.Advance(sim.obs, sim.costs, sim.start.Add(3*time.Hour), params)
-	if _, ok := early.KAuto(params); ok && early.KSum7d < params.KMinWeeklyPoints {
-		t.Fatal("k estimated before enough weekly gain")
+	early := EstimateK(kFrom(sim, sim.start.Add(30*time.Minute), params), params, sim.start.Add(30*time.Minute))
+	if early.K != nil || early.Basis != KBasisNone {
+		t.Fatalf("k estimated before enough weekly gain: %+v", early)
+	}
+}
+
+func TestKFollowsAChangeThroughTheRecentGroup(t *testing.T) {
+	params := DefaultParams()
+	sim := newSimulation(21, 40, 6)
+	sim.runDays(0, 30, cleanUsage)
+	sim.k = 4
+	sim.runDays(30, 14, cleanUsage)
+	now := sim.end(44)
+	estimate := EstimateK(kFrom(sim, now, params), params, now)
+	if !estimate.Recent.Valid || !estimate.Old.Valid || estimate.Basis != KBasisBlend {
+		t.Fatalf("groups = %+v", estimate)
+	}
+	if relativeError(estimate.Recent.K, 4) > 0.04 || relativeError(estimate.Recent.K, 4) < -0.04 ||
+		relativeError(estimate.Old.K, 6) > 0.04 || relativeError(estimate.Old.K, 6) < -0.04 {
+		t.Fatalf("recent k %.3f (truth 4), old k %.3f (truth 6)", estimate.Recent.K, estimate.Old.K)
+	}
+	want := 0.9*estimate.Recent.K + 0.1*estimate.Old.K
+	if math.Abs(*estimate.K-want) > 1e-9 || *estimate.K > 4.4 {
+		t.Fatalf("k = %.3f, want %.3f", *estimate.K, want)
+	}
+	// An all-time sum would still be dominated by the old k.
+	if estimate.Total.K < 4.6 {
+		t.Fatalf("total k = %.3f", estimate.Total.K)
+	}
+}
+
+func TestKGroupFallbacks(t *testing.T) {
+	params := DefaultParams()
+	now := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	recent := func(g5, g7 float64) KBucket { return KBucket{At: now.Add(-48 * time.Hour), Gain5h: g5, Gain7d: g7} }
+	old := func(g5, g7 float64) KBucket {
+		return KBucket{At: now.Add(-30 * 24 * time.Hour), Gain5h: g5, Gain7d: g7}
+	}
+	for _, test := range []struct {
+		name    string
+		buckets []KBucket
+		basis   string
+		k       float64
+	}{
+		{"both valid", []KBucket{recent(50, 10), old(80, 10)}, KBasisBlend, 0.9*5 + 0.1*8},
+		{"recent only", []KBucket{recent(50, 10), old(16, 2)}, KBasisRecent, 5},
+		{"old only", []KBucket{recent(10, 2), old(80, 10)}, KBasisOld, 8},
+		{"combined", []KBucket{recent(30, 6), old(28, 4)}, KBasisTotal, 5.8},
+		{"not enough", []KBucket{recent(20, 4), old(20, 4)}, KBasisNone, 0},
+		{"no evidence", nil, KBasisNone, 0},
+	} {
+		estimate := EstimateK(test.buckets, params, now)
+		if estimate.Basis != test.basis || (test.k == 0) != (estimate.K == nil) || estimate.K != nil && math.Abs(*estimate.K-test.k) > 1e-9 {
+			t.Errorf("%s: %+v", test.name, estimate)
+		}
+	}
+	// Without a valid k, cold start keeps the 5-hour reservation off.
+	status := ResolveAccount("a", AccountSettings{Tier: TierPro}, Estimate{}, EstimateK(nil, params, now), Observation{}, params, now)
+	if status.K != nil || status.FiveHourTotal != 0 || status.WeeklyTotal != 250 || !status.ColdStart {
+		t.Fatalf("status = %+v", status)
 	}
 }
 
@@ -346,28 +417,29 @@ func TestColdStartSwitchesToEstimate(t *testing.T) {
 	sim := newSimulation(13, truth, 6)
 	sim.run(20, cleanUsage)
 	now := sim.end(21)
-	state, segments := process(t, sim, now, 24*time.Hour, params)
+	_, segments := process(t, sim, now, 24*time.Hour, params)
 	latest := Observation{At: now.Add(-time.Minute), Has5h: true, Used5h: 20, Reset5h: now.Add(time.Hour), Has7d: true, Used7d: 50, Reset7d: now.Add(48 * time.Hour)}
 
 	// Few blocks: cold start uses the tier default; without a manual k and
 	// before k is estimated, there is no 5-hour total.
 	early := EstimateSegments(segments[:40], params, now)
-	status := ResolveAccount("a", AccountSettings{Tier: TierMax5x}, early, StreamState{}, latest, params, now)
+	kEstimate := EstimateK(kFrom(sim, now, params), params, now)
+	status := ResolveAccount("a", AccountSettings{Tier: TierMax5x}, early, KEstimate{}, latest, params, now)
 	if !status.ColdStart || status.WeeklyTotal != 1250 || status.FiveHourTotal != 0 || status.KSource != SourceNone {
 		t.Fatalf("cold status = %+v", status)
 	}
 	manual := 5.0
-	status = ResolveAccount("a", AccountSettings{Tier: TierMax5x, ManualK: &manual}, early, StreamState{}, latest, params, now)
+	status = ResolveAccount("a", AccountSettings{Tier: TierMax5x, ManualK: &manual}, early, KEstimate{}, latest, params, now)
 	if status.FiveHourTotal != 250 || status.KSource != SourceManual {
 		t.Fatalf("cold status with manual k = %+v", status)
 	}
-	status = ResolveAccount("a", AccountSettings{Tier: TierMax5x}, early, state, latest, params, now)
+	status = ResolveAccount("a", AccountSettings{Tier: TierMax5x}, early, kEstimate, latest, params, now)
 	if status.KSource != SourceAuto || status.FiveHourTotal <= 0 {
 		t.Fatalf("cold status with estimated k = %+v", status)
 	}
 
 	full := EstimateSegments(segments, params, now)
-	status = ResolveAccount("a", AccountSettings{Tier: TierMax5x}, full, state, latest, params, now)
+	status = ResolveAccount("a", AccountSettings{Tier: TierMax5x}, full, kEstimate, latest, params, now)
 	if status.ColdStart || status.TotalsFrom != SourceEstimated {
 		t.Fatalf("warm status = %+v", status)
 	}
@@ -382,7 +454,7 @@ func TestColdStartSwitchesToEstimate(t *testing.T) {
 		t.Fatalf("remaining = %.2f / %.2f", status.RemainingWeek, status.RemainingFiveHour)
 	}
 	// A window whose reset passed reads as unused.
-	status = ResolveAccount("a", AccountSettings{}, full, state, latest, params, now.Add(2*time.Hour))
+	status = ResolveAccount("a", AccountSettings{}, full, kEstimate, latest, params, now.Add(2*time.Hour))
 	if status.Used5h != 0 || status.Used7d != 50 || status.Tier != TierPro {
 		t.Fatalf("expired status = %+v", status)
 	}
@@ -396,7 +468,7 @@ func TestEstimateAcrossSeeds(t *testing.T) {
 		for _, kind := range []contamination{cleanUsage, sporadicOutside, sustainedOutside} {
 			sim := newSimulation(seed, truth, 6)
 			sim.run(20, kind)
-			state, segments := process(t, sim, sim.end(21), 24*time.Hour, params)
+			_, segments := process(t, sim, sim.end(21), 24*time.Hour, params)
 			estimate := EstimateSegments(segments, params, sim.end(21))
 			if kind == cleanUsage {
 				clean = estimate.FiveHourUSD
@@ -407,8 +479,9 @@ func TestEstimateAcrossSeeds(t *testing.T) {
 			if estimate.FiveHourUSD > clean*1.01 {
 				t.Errorf("seed %d kind %d: contaminated T_5h %.2f exceeds clean %.2f", seed, kind, estimate.FiveHourUSD, clean)
 			}
-			if k, ok := state.KAuto(params); !ok || relativeError(k, 6) > 0.03 || relativeError(k, 6) < -0.03 {
-				t.Errorf("seed %d kind %d: k = %.3f", seed, kind, k)
+			estimateK := EstimateK(kFrom(sim, sim.end(21), params), params, sim.end(21))
+			if k := estimateK.K; k == nil || relativeError(*k, 6) > 0.03 || relativeError(*k, 6) < -0.03 {
+				t.Errorf("seed %d kind %d: k = %+v", seed, kind, estimateK)
 			}
 		}
 	}

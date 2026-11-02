@@ -811,9 +811,7 @@
   "cc.totals_from_estimated": "From the estimate",
   "cc.unknown": "Unknown",
   "cc.k": "k",
-  "cc.k_auto_value": "auto {v0}",
   "cc.k_used_value": "used {v0}",
-  "cc.k_evidence_tip": "Paired gains: 5-hour {v0} points, 7-day {v1} points",
   "cc.remaining_week_5h": "R week / R 5h",
   "cc.clean_blocks": "Clean / all blocks",
   "cc.blocks_value": "{v0} / {v1}",
@@ -910,5 +908,16 @@
   "cc.block_reference": "Reference",
   "cc.import_prices": "Import JSON",
   "cc.price_import_invalid": "The file is not valid JSON",
-  "cc.price_import_done": "Imported {v0} models as {v1} model IDs"
+  "cc.price_import_done": "Imported {v0} models as {v1} model IDs",
+  "cc.k_recent_value": "Recent: {v0} ({v1} / {v2} pts)",
+  "cc.k_old_value": "Older: {v0} ({v1} / {v2} pts)",
+  "cc.k_group_insufficient": "The 7-day gain of this group is below {v0} points, so it does not count on its own",
+  "cc.k_source_manual": "manual",
+  "cc.k_source_auto": "estimated",
+  "cc.k_source_none": "none",
+  "cc.k_basis_blend": "Both groups are valid and combine by the recent share",
+  "cc.k_basis_recent": "Only the recent group is valid",
+  "cc.k_basis_old": "Only the older group is valid",
+  "cc.k_basis_total": "Neither group alone is enough; the combined ratio is used",
+  "cc.k_basis_none": "Not enough 7-day gain to estimate k"
 }

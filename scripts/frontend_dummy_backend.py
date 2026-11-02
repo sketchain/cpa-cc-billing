@@ -1805,7 +1805,10 @@ def cc_payload():
         accounts.append({
             "auth_index": index, "tier": settings.get("tier") or "pro", "total_blocks": 34, "clean_blocks": 31, "segments": 1180,
             "excluded_segments": 74, "ratio": 2.21, "five_hour_usd": 45.2, "k_auto": 6.02, "k_manual": settings.get("manual_k"),
-            "k": k, "k_source": "manual" if settings.get("manual_k") else "auto", "k_sum_5h": 361, "k_sum_7d": 60,
+            "k": k, "k_source": "manual" if settings.get("manual_k") else "auto",
+            "k_estimate": {"recent": {"gain_5h": 301, "gain_7d": 50, "k": 6.02, "valid": True},
+                           "old": {"gain_5h": 42, "gain_7d": 6, "k": 7.0, "valid": False},
+                           "total": {"gain_5h": 343, "gain_7d": 56, "k": 6.13, "valid": True}, "k": 6.02, "basis": "recent"},
             "cold_start": False, "totals_from": "estimated", "five_hour_total_usd": 45.2, "weekly_total_usd": 45.2 * k,
             "used_5h": 37, "used_7d": 58, "reset_5h": iso(NOW + timedelta(hours=2, minutes=14)), "reset_7d": iso(NOW + timedelta(days=3, hours=4)),
             "observed_at": iso(NOW - timedelta(minutes=1)), "remaining_week_usd": 0.9 * 45.2 * k * 0.42,

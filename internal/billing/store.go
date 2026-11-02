@@ -45,6 +45,9 @@ type Store struct {
 	downloadReferencePrices func(context.Context) ([]byte, error)
 
 	now func() time.Time
+
+	// usageObserver is the cpa-cc-billing hook for recorded usage.
+	usageObserver UsageObserver
 }
 
 func NewStore(open func(string) (Repository, error), downloadReferencePrices func(context.Context) ([]byte, error)) *Store {

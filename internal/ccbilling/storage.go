@@ -12,7 +12,7 @@ import (
 // versioned separately in cc_meta, so the billing schema version and its
 // migrations stay exactly those of upstream cpa-key-billing: a database copied
 // from cpa-key-billing opens unchanged and gains these tables on first use.
-const ccSchemaVersion = 1
+const ccSchemaVersion = 2
 
 var ccMigrations = []string{
 	// Version 1.
@@ -29,6 +29,16 @@ var ccMigrations = []string{
 		auth_index TEXT PRIMARY KEY,
 		state_json TEXT NOT NULL
 	);`,
+	// Version 2: time-bucketed k evidence. Streams of version 1 have no k
+	// cursor, so their k evidence is rebuilt from the retained history; the
+	// segments stay as they are.
+	`CREATE TABLE IF NOT EXISTS cc_k_buckets (
+		auth_index TEXT    NOT NULL,
+		bucket_at  INTEGER NOT NULL,
+		gain_5h    REAL    NOT NULL,
+		gain_7d    REAL    NOT NULL,
+		PRIMARY KEY (auth_index, bucket_at)
+	) WITHOUT ROWID;`,
 }
 
 const (
@@ -169,7 +179,7 @@ func loadSegments(db *sql.DB, authIndex string, since time.Time) ([]Segment, err
 
 // commitAdvance stores an account's new segments with the stream position
 // that produced them, so a failure retries the same data.
-func commitAdvance(db *sql.DB, authIndex string, state StreamState, segments []Segment) error {
+func commitAdvance(db *sql.DB, authIndex string, state StreamState, segments []Segment, buckets []KBucket) error {
 	raw, err := json.Marshal(state)
 	if err != nil {
 		return err
@@ -181,6 +191,13 @@ func commitAdvance(db *sql.DB, authIndex string, state StreamState, segments []S
 				return fmt.Errorf("Save CC segments: %w", err)
 			}
 		}
+		for _, bucket := range buckets {
+			if _, err := tx.Exec(`INSERT INTO cc_k_buckets (auth_index, bucket_at, gain_5h, gain_7d) VALUES (?, ?, ?, ?)
+				ON CONFLICT(auth_index, bucket_at) DO UPDATE SET gain_5h = gain_5h + excluded.gain_5h, gain_7d = gain_7d + excluded.gain_7d`,
+				authIndex, nanos(bucket.At), bucket.Gain5h, bucket.Gain7d); err != nil {
+				return fmt.Errorf("Save CC k evidence: %w", err)
+			}
+		}
 		if _, err := tx.Exec(`INSERT INTO cc_streams (auth_index, state_json) VALUES (?, ?)
 			ON CONFLICT(auth_index) DO UPDATE SET state_json = excluded.state_json`, authIndex, string(raw)); err != nil {
 			return fmt.Errorf("Save CC stream: %w", err)
@@ -190,17 +207,37 @@ func commitAdvance(db *sql.DB, authIndex string, state StreamState, segments []S
 }
 
 func pruneSegments(db *sql.DB, before time.Time) error {
-	if _, err := db.Exec(`DELETE FROM cc_segments WHERE at < ?`, nanos(before)); err != nil {
+	if _, err := db.Exec(`DELETE FROM cc_segments WHERE at < ?; DELETE FROM cc_k_buckets WHERE bucket_at < ?`, nanos(before), nanos(before)); err != nil {
 		return fmt.Errorf("Prune CC segments: %w", err)
 	}
 	return nil
+}
+
+func loadKBuckets(db *sql.DB, authIndex string, since time.Time) ([]KBucket, error) {
+	rows, err := db.Query(`SELECT bucket_at, gain_5h, gain_7d FROM cc_k_buckets WHERE auth_index = ? AND bucket_at >= ? ORDER BY bucket_at`,
+		authIndex, nanos(since))
+	if err != nil {
+		return nil, fmt.Errorf("Read CC k evidence: %w", err)
+	}
+	defer rows.Close()
+	var buckets []KBucket
+	for rows.Next() {
+		var at int64
+		var bucket KBucket
+		if err := rows.Scan(&at, &bucket.Gain5h, &bucket.Gain7d); err != nil {
+			return nil, fmt.Errorf("Read CC k evidence: %w", err)
+		}
+		bucket.At = timeAt(at)
+		buckets = append(buckets, bucket)
+	}
+	return buckets, rows.Err()
 }
 
 // resetStreams forgets every segment and stream position, so the next refresh
 // rebuilds them from the retained request history.
 func resetStreams(db *sql.DB) error {
 	return transact(db, func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`DELETE FROM cc_segments; DELETE FROM cc_streams;`); err != nil {
+		if _, err := tx.Exec(`DELETE FROM cc_segments; DELETE FROM cc_streams; DELETE FROM cc_k_buckets;`); err != nil {
 			return fmt.Errorf("Reset CC segments: %w", err)
 		}
 		return nil

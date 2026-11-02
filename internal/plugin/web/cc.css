@@ -24,3 +24,5 @@
 .cc-pool { min-width: 0; }
 .cc-pool .tag.metrics { flex-wrap: wrap; white-space: normal; max-width: 100%; row-gap: 2px; }
 .cc-pool-name { width: auto; }
+.cc-k { white-space: nowrap; font-size: 12px; }
+.cc-k-final { font-weight: 600; font-size: 13px; }

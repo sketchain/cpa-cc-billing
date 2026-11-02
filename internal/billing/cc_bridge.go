@@ -127,3 +127,25 @@ func (s *Store) AlignWindowAnchor(planID string, periodSeconds int64, resetAt ti
 
 // SetClock replaces the store's clock; tests outside this package use it.
 func (s *Store) SetClock(now func() time.Time) { s.now = now }
+
+// UsageObserver receives each recorded request after it is stored: its key,
+// request time and cost in USD.
+type UsageObserver func(scope string, at time.Time, costUSD float64)
+
+// SetUsageObserver installs the observer recorded usage is reported to. It is
+// set once, before the store receives traffic.
+func (s *Store) SetUsageObserver(observer UsageObserver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.usageObserver = observer
+}
+
+func (s *Store) notifyUsage(event RequestEvent) {
+	s.mu.RLock()
+	observer, rate := s.usageObserver, s.cfg.CNYPerUSD
+	s.mu.RUnlock()
+	if observer == nil || event.Scope == "" {
+		return
+	}
+	observer(event.Scope, event.At, rate.Convert(event.Cost.Total, event.Cost.Currency, USD))
+}
