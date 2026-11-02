@@ -17,7 +17,7 @@ plugins:
   enabled: true
   dir: "__RUNTIME_DIR__/plugins"
   configs:
-    cpa-key-billing:
+    cpa-cc-billing:
       enabled: true
       debug: true
       state_file: "__RUNTIME_DIR__/state.db"

@@ -131,6 +131,7 @@ func TestManagementRegistrationExposesOnlyCurrentEndpoints(t *testing.T) {
 		"GET /plugin-logs", "DELETE /plugin-logs", "GET /auth-files", "GET /auth-files/quota",
 		"POST /auth-files/quota/reset", "GET /auth-files/history", "GET /usage/models",
 		"GET /ai-providers", "POST /ai-providers/balance", "POST /ai-providers/note",
+		"GET /cc", "PUT /cc/settings", "POST /cc/refresh", "POST /cc/rebuild", "POST /prices/import",
 	} {
 		wantRoutes[value] = false
 	}
@@ -155,7 +156,7 @@ func TestManagementRegistrationExposesOnlyCurrentEndpoints(t *testing.T) {
 		"/ui": false, "/profile": false, "/subscription": false, "/routing": false, "/currency": false, "/prices": false,
 		"/analysis": false, "/analysis/speed": false, "/events": false, "/errors": false,
 		"/auth-files": false, "/auth-files/quota": false, "/auth-files/quota/reset": false, "/auth-files/history": false,
-		"/usage/models": false, "/ai-providers": false,
+		"/usage/models": false, "/ai-providers": false, "/balance": false,
 	}
 	if len(registration.Resources) != len(wantResources) {
 		t.Fatalf("resources = %d, want %d: %+v", len(registration.Resources), len(wantResources), registration.Resources)

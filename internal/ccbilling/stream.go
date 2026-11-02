@@ -1,0 +1,258 @@
+package ccbilling
+
+import (
+	"math"
+	"sort"
+	"time"
+)
+
+// Window lengths of Claude's unified limits.
+const (
+	FiveHours = 5 * time.Hour
+	Week      = 7 * 24 * time.Hour
+)
+
+// Shared with billing.QuotaWindowPeriods: reset times within a minute are the
+// same boundary, and a request that began before a reset can still report the
+// old counter for a while, so only data older than the reorder horizon is final.
+const (
+	boundaryJitter  = time.Minute
+	ReorderHorizon  = 10 * time.Minute
+	resetPriorFloor = 5
+	resetNearZero   = 1
+	resetLargeDrop  = 20
+	gainEpsilon     = 1e-6
+)
+
+// Observation is what one response reported about an account's unified windows.
+// Anthropic evaluates the headers when it admits the request, so At is the
+// request's start time.
+type Observation struct {
+	At      time.Time `json:"at"`
+	Has5h   bool      `json:"has_5h"`
+	Used5h  float64   `json:"used_5h"`
+	Reset5h time.Time `json:"reset_5h,omitzero"`
+	Has7d   bool      `json:"has_7d"`
+	Used7d  float64   `json:"used_7d"`
+	Reset7d time.Time `json:"reset_7d,omitzero"`
+}
+
+// CostEvent is one request's cost, which counts against the account once the
+// request completes.
+type CostEvent struct {
+	At  time.Time
+	USD float64
+}
+
+// Segment is the cost of one rise of the 5-hour utilization, normally 1%, of
+// one account. Block is the start of the uninterrupted run it belongs to.
+type Segment struct {
+	At      time.Time `json:"at"`
+	Block   time.Time `json:"block"`
+	CostUSD float64   `json:"cost_usd"`
+	Gain    float64   `json:"gain"`
+}
+
+// windowTrack follows the current period of one quota window.
+type windowTrack struct {
+	Known   bool      `json:"known"`
+	ResetAt time.Time `json:"reset_at,omitzero"`
+	Max     float64   `json:"max"`
+}
+
+type windowStep int
+
+const (
+	stepStale windowStep = iota
+	stepSame
+	stepNewPeriod
+)
+
+func counterReset(previous, current float64) bool {
+	return previous >= resetPriorFloor && current < previous &&
+		(current <= resetNearZero || previous-current >= resetLargeDrop && current <= previous/2)
+}
+
+// observe applies one report and returns how it relates to the tracked
+// period and how far it raised the period's highest utilization. Lower
+// values within a period are reports that arrived out of order.
+func (w *windowTrack) observe(at time.Time, used float64, resetAt time.Time) (windowStep, float64) {
+	scheduled := resetAt.After(at)
+	if !scheduled {
+		resetAt = time.Time{}
+	}
+	start := func() (windowStep, float64) {
+		*w = windowTrack{Known: true, ResetAt: resetAt, Max: used}
+		return stepNewPeriod, 0
+	}
+	if !w.Known {
+		return start()
+	}
+	expired := !w.ResetAt.IsZero() && !at.Before(w.ResetAt)
+	switch {
+	case expired:
+		if scheduled && resetAt.Before(w.ResetAt.Add(-boundaryJitter)) {
+			return stepStale, 0
+		}
+		return start()
+	case scheduled && !w.ResetAt.IsZero() && resetAt.Before(w.ResetAt.Add(-boundaryJitter)):
+		// An earlier period's report delivered after its successor began.
+		return stepStale, 0
+	case counterReset(w.Max, used):
+		return start()
+	case scheduled && !w.ResetAt.IsZero() && resetAt.After(w.ResetAt.Add(boundaryJitter)) && used < w.Max-resetNearZero:
+		// The reset time moved later while usage dropped: an early reset.
+		return start()
+	}
+	if scheduled {
+		w.ResetAt = resetAt
+	}
+	if used > w.Max+gainEpsilon {
+		delta := used - w.Max
+		w.Max = used
+		return stepSame, delta
+	}
+	return stepSame, 0
+}
+
+// StreamState is an account's incremental position in its request history.
+// Everything up to Cursor has been turned into segments and k evidence.
+type StreamState struct {
+	Cursor      time.Time   `json:"cursor,omitzero"`
+	LastEventAt time.Time   `json:"last_event_at,omitzero"`
+	FiveHour    windowTrack `json:"five_hour"`
+	Weekly      windowTrack `json:"weekly"`
+	BlockStart  time.Time   `json:"block_start,omitzero"`
+	// Armed means the block has seen a first rise, so the cost since the last
+	// rise belongs to the next segment. Cost before a block's first rise
+	// covers an unknown fraction of a point and is discarded.
+	Armed   bool    `json:"armed"`
+	AccCost float64 `json:"acc_cost"`
+	// K follows the same reports for k evidence with its own cursor, so k can
+	// be rebuilt from history without touching the segments.
+	K KStream `json:"k"`
+}
+
+func (s *StreamState) breakBlock() {
+	s.BlockStart, s.Armed, s.AccCost = time.Time{}, false, 0
+}
+
+type streamEvent struct {
+	at   time.Time
+	obs  *Observation
+	cost float64
+}
+
+// Advance consumes the observations and costs that happened after the cursor
+// and no later than until, and returns the segments they complete.
+func (s *StreamState) Advance(observations []Observation, costs []CostEvent, until time.Time, params Params) []Segment {
+	events := make([]streamEvent, 0, len(observations)+len(costs))
+	for i := range observations {
+		if observations[i].At.After(s.Cursor) && !observations[i].At.After(until) {
+			events = append(events, streamEvent{at: observations[i].At, obs: &observations[i]})
+		}
+	}
+	for _, cost := range costs {
+		if cost.At.After(s.Cursor) && !cost.At.After(until) {
+			events = append(events, streamEvent{at: cost.At, cost: cost.USD})
+		}
+	}
+	// A report precedes a cost at the same instant: it was evaluated before
+	// that request's usage could count.
+	sort.SliceStable(events, func(i, j int) bool {
+		if !events[i].at.Equal(events[j].at) {
+			return events[i].at.Before(events[j].at)
+		}
+		return events[i].obs != nil && events[j].obs == nil
+	})
+	var segments []Segment
+	gap := params.gap()
+	for _, event := range events {
+		if !s.LastEventAt.IsZero() && event.at.Sub(s.LastEventAt) > gap {
+			s.breakBlock()
+		}
+		if event.at.After(s.LastEventAt) {
+			s.LastEventAt = event.at
+		}
+		if s.BlockStart.IsZero() {
+			s.BlockStart = event.at
+		}
+		if event.obs == nil {
+			if s.Armed && finite(event.cost) && event.cost > 0 {
+				s.AccCost += event.cost
+			}
+			continue
+		}
+		obs := event.obs
+		step5, delta5 := stepStale, 0.0
+		if obs.Has5h {
+			step5, delta5 = s.FiveHour.observe(obs.At, obs.Used5h, obs.Reset5h)
+		}
+		if obs.Has7d {
+			s.Weekly.observe(obs.At, obs.Used7d, obs.Reset7d)
+		}
+		switch step5 {
+		case stepNewPeriod:
+			s.breakBlock()
+			s.BlockStart = event.at
+		case stepSame:
+			if delta5 > gainEpsilon {
+				if s.Armed {
+					segments = append(segments, Segment{At: event.at, Block: s.BlockStart, CostUSD: s.AccCost, Gain: roundGain(delta5)})
+				}
+				s.Armed, s.AccCost = true, 0
+			}
+		}
+	}
+	if until.After(s.Cursor) {
+		s.Cursor = until
+	}
+	return segments
+}
+
+func roundGain(value float64) float64 { return math.Round(value*1e6) / 1e6 }
+
+// KStream turns an account's reports into k evidence: the 5-hour and 7-day
+// gains between consecutive reports in which neither window reset, so outside
+// usage raises both alike.
+type KStream struct {
+	Cursor   time.Time   `json:"cursor,omitzero"`
+	FiveHour windowTrack `json:"five_hour"`
+	Weekly   windowTrack `json:"weekly"`
+}
+
+// KEvidence is the paired gain one report added.
+type KEvidence struct {
+	At     time.Time
+	Gain5h float64
+	Gain7d float64
+}
+
+// Advance consumes the reports after the cursor and no later than until.
+func (k *KStream) Advance(observations []Observation, until time.Time) []KEvidence {
+	selected := make([]Observation, 0, len(observations))
+	for _, obs := range observations {
+		if obs.At.After(k.Cursor) && !obs.At.After(until) {
+			selected = append(selected, obs)
+		}
+	}
+	sort.SliceStable(selected, func(i, j int) bool { return selected[i].At.Before(selected[j].At) })
+	var evidence []KEvidence
+	for _, obs := range selected {
+		step5, delta5, step7, delta7 := stepStale, 0.0, stepStale, 0.0
+		known5, known7 := k.FiveHour.Known, k.Weekly.Known
+		if obs.Has5h {
+			step5, delta5 = k.FiveHour.observe(obs.At, obs.Used5h, obs.Reset5h)
+		}
+		if obs.Has7d {
+			step7, delta7 = k.Weekly.observe(obs.At, obs.Used7d, obs.Reset7d)
+		}
+		if step5 == stepSame && step7 == stepSame && known5 && known7 && (delta5 > gainEpsilon || delta7 > gainEpsilon) {
+			evidence = append(evidence, KEvidence{At: obs.At, Gain5h: delta5, Gain7d: delta7})
+		}
+	}
+	if until.After(k.Cursor) {
+		k.Cursor = until
+	}
+	return evidence
+}

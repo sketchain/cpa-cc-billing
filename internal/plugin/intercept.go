@@ -157,6 +157,14 @@ func (a *App) interceptBeforeAuth(raw []byte) ([]byte, error) {
 		}
 	}
 
+	// cpa-cc-billing: CC pool reservations, before quota admission opens a cycle.
+	if response, refused := a.ccAdmission(req.SourceFormat, scope, generate); refused {
+		if generate {
+			a.store.ReleaseSlot(req.RequestID)
+		}
+		return OKEnvelope(response)
+	}
+
 	// Reference price refresh may have taken time. Quota and Retry-After share the
 	// current instant, rather than the instant before the download.
 	now := a.store.Now()
@@ -263,6 +271,8 @@ func (a *App) handleUsage(raw []byte) ([]byte, error) {
 	} else {
 		a.store.RecordUsage(event)
 	}
+	a.ccObserve(record.AuthIndex, event.Quota, record.RequestedAt)
+	a.ccAfterUsage()
 	a.observeCredentialUsage(record.AuthIndex, record.AuthType, event.Account)
 	return OKEnvelope(struct{}{})
 }
@@ -455,8 +465,8 @@ func retryAfterSeconds(resetAt, now time.Time) int {
 
 func priceRefusal(format, code, message string) RequestInterceptResponse {
 	kind := refusal{
-		anthropicType: "cpa_key_billing_error",
-		openaiType:    "cpa_key_billing_error",
+		anthropicType: "cpa_cc_billing_error",
+		openaiType:    "cpa_cc_billing_error",
 		openaiCode:    code,
 	}
 	return RequestInterceptResponse{

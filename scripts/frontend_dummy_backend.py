@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 UI_DIR = ROOT / "internal" / "plugin" / "web"
 # Matches the placeholders internal/plugin/ui.go replaces with sibling files.
 UI_INCLUDE = re.compile(r"/\*([a-z0-9-]+\.(?:css|js))\*/")
-API_BASE = "/v0/management/plugins/cpa-key-billing"
-RESOURCE_BASE = "/v0/resource/plugins/cpa-key-billing"
+API_BASE = "/v0/management/plugins/cpa-cc-billing"
+RESOURCE_BASE = "/v0/resource/plugins/cpa-cc-billing"
 NOW = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 CALLER_SCOPE_SALT = b"cli-proxy-api:caller-scope:v1\0"
 
@@ -30,7 +30,7 @@ HOST_SHELL = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__HOST_LABEL__ · CPA Key Billing 样式预览</title>
+<title>__HOST_LABEL__ · CPA CC Billing 样式预览</title>
 <script>
 {
   const scope="__HOST_MODE__"==="cpamp"?"v2|"+location.host:location.host;
@@ -163,10 +163,10 @@ html[data-host=cpamp] #plugin-frame{background:var(--bg-primary)}
 <body>
 <aside class="sidebar">
   <div class="brand"><span class="brand-mark">◈</span><span>__HOST_LABEL__</span></div>
-  <div class="nav-placeholder"><span>仪表盘</span><span>AI 提供商</span><span>插件管理</span><span class="active">CPA Key Billing</span></div>
+  <div class="nav-placeholder"><span>仪表盘</span><span>AI 提供商</span><span>插件管理</span><span class="active">CPA CC Billing</span></div>
 </aside>
 <header class="navbar">
-  <div class="navbar-left"><button class="mobile-menu" title="菜单">☰</button><span>CPA Key Billing</span></div>
+  <div class="navbar-left"><button class="mobile-menu" title="菜单">☰</button><span>CPA CC Billing</span></div>
   <div class="theme-controls" aria-label="预览主题">
     <select id="host-language" aria-label="Language"><option value="en">English</option><option value="zh-CN">简体中文</option><option value="zh-TW">繁體中文</option><option value="ru">Русский</option></select>
     <button type="button" data-action="refresh" title="刷新">↻</button>
@@ -175,7 +175,7 @@ html[data-host=cpamp] #plugin-frame{background:var(--bg-primary)}
     <button type="button" data-theme-choice="dark" title="深色主题">●</button>
   </div>
 </header>
-<main class="content"><iframe id="plugin-frame" src="/ui" title="CPA Key Billing 插件"></iframe></main>
+<main class="content"><iframe id="plugin-frame" src="/ui" title="CPA CC Billing 插件"></iframe></main>
 <script>
 "use strict";
 const HOST_MODE="__HOST_MODE__";
@@ -1421,7 +1421,7 @@ PLUGIN_LOGS = [
         "at": iso(NOW - timedelta(minutes=11)),
         "level": "info",
         "message": (
-            "已加载计费数据库 /srv/cli-proxy-api/plugins/cpa-key-billing-state-v1.db："
+            "已加载计费数据库 /srv/cli-proxy-api/plugins/cpa-cc-billing-state-v1.db："
             "8 个 API Key、3 个订阅计划、29 条请求事件。已启用。"
         ),
     },
@@ -1778,11 +1778,75 @@ def key_rows():
                  credential_labels=credential_labels(key["route_bindings"]["credential_ids"] + key["route_bindings"].get("denied_credential_ids", []))) for key in KEYS]
 
 
+# CC split preview: one Claude account, one pool, one fixed and one remainder key.
+CC_DEFAULT_PARAMS = {
+    "segment_retention_days": 365, "block_gap_minutes": 5, "window_percent": 8, "reference_mode": "global",
+    "suspicious_threshold": 0.2, "exclude_vote_share": 0.5, "weight_power": 2, "recent_days": 14, "recent_share": 0.9,
+    "k_min_weekly_points": 10, "cold_start_blocks": 20, "tier_weekly_usd": {"pro": 250, "max5x": 1250, "max20x": 2500},
+    "safety_factor": 0.9,
+}
+CC_SETTINGS = {
+    "params": json.loads(json.dumps(CC_DEFAULT_PARAMS)),
+    "pools": [{"id": "pool-1", "name": "Claude 主账号", "auth_indexes": ["auth-demo-claude"]}],
+    "accounts": {"auth-demo-claude": {"tier": "max5x"}},
+    "keys": {LIVE_KEYS[0]["scope"]: {"kind": "fixed", "pool_id": "pool-1"},
+             LIVE_KEYS[1]["scope"]: {"kind": "remainder", "pool_id": "pool-1", "weekly_cap_usd": 300}},
+}
+
+
+def cc_payload():
+    blocks = [{"start": iso(NOW - timedelta(hours=6 * index + 2)), "end": iso(NOW - timedelta(hours=6 * index)), "segments": 40 - index,
+               "excluded": index % 3, "gain": 40 - index, "cost_usd": 18 - index * 0.2, "clean_gain": 40 - index - index % 3,
+               "clean_cost_usd": 18 - index * 0.2, "reference": 2.2, "reference_mode": "global" if index < 8 else "block"} for index in range(10)]
+    accounts = []
+    for index in dict.fromkeys([i for pool in CC_SETTINGS["pools"] for i in pool["auth_indexes"]] + list(CC_SETTINGS["accounts"])):
+        settings = CC_SETTINGS["accounts"].get(index, {})
+        k = settings.get("manual_k") or 6.02
+        accounts.append({
+            "auth_index": index, "tier": settings.get("tier") or "pro", "total_blocks": 34, "clean_blocks": 31, "segments": 1180,
+            "excluded_segments": 74, "ratio": 2.21, "five_hour_usd": 45.2, "k_auto": 6.02, "k_manual": settings.get("manual_k"),
+            "k": k, "k_source": "manual" if settings.get("manual_k") else "auto",
+            "k_estimate": {"recent": {"gain_5h": 301, "gain_7d": 50, "k": 6.02, "valid": True},
+                           "old": {"gain_5h": 42, "gain_7d": 6, "k": 7.0, "valid": False},
+                           "total": {"gain_5h": 343, "gain_7d": 56, "k": 6.13, "valid": True}, "k": 6.02, "basis": "recent"},
+            "cold_start": False, "totals_from": "estimated", "five_hour_total_usd": 45.2, "weekly_total_usd": 45.2 * k,
+            "used_5h": 37, "used_7d": 58, "reset_5h": iso(NOW + timedelta(hours=2, minutes=14)), "reset_7d": iso(NOW + timedelta(days=3, hours=4)),
+            "observed_at": iso(NOW - timedelta(minutes=1)), "remaining_week_usd": 0.9 * 45.2 * k * 0.42,
+            "remaining_five_hour_usd": 0.9 * 45.2 * 0.63, "cursor": iso(NOW - timedelta(minutes=10)),
+            "weekly_start": iso(NOW - timedelta(days=3, hours=20)), "recent_blocks": blocks,
+        })
+    keys = []
+    for scope, settings in sorted(CC_SETTINGS["keys"].items()):
+        key = next((item for item in KEYS if item["scope"] == scope), {})
+        row = {"scope": scope, "preview": key.get("preview"), "label": key.get("label"), "settings": settings, "valid": True,
+               "weekly_usd": 100, "used_week_usd": 42.5, "used_five_hour_usd": 3.1, "reserve_five_hour_usd": 13.5,
+               "reserve_week_usd": 57.5, "cycle_end": iso(NOW + timedelta(days=3, hours=4)), "used_cap_usd": 120.4,
+               "balance_usd": 57.5, "reported_balance_usd": 57.5}
+        if settings["kind"] == "fixed":
+            row["alignment"] = {"status": "aligned"}
+        else:
+            row.update(balance_usd=78.3, reported_balance_usd=78.3, admitted=False, refusal="five_hour_reserve",
+                       retry_at=iso(NOW + timedelta(hours=2, minutes=14)))
+        keys.append(row)
+    pools = [{"id": pool["id"], "name": pool["name"], "auth_indexes": pool["auth_indexes"], "remaining_week_usd": 135.8,
+              "remaining_five_hour_usd": 25.6, "reserved_week_usd": 57.5, "reserved_five_hour_usd": 13.5, "k": 6.02,
+              "five_hour_enabled": True, "fixed": [], "remainder_balance_usd": 78.3} for pool in CC_SETTINGS["pools"]]
+    credentials = [{"auth_index": item["auth_index"], "name": item.get("email") or item["name"], "disabled": item.get("disabled", False)}
+                   for item in AUTH_FILES if item["category"] == "claude"]
+    options = [{"scope": key["scope"], "preview": key["preview"], "label": key["label"], "plan_name": key.get("plan_name", ""),
+                "has_weekly_window": True} for key in LIVE_KEYS]
+    return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "accounts": accounts, "pools": pools, "keys": keys,
+                   "stored_segments": 1180, "at": iso(NOW)},
+            "credentials": credentials, "key_options": options, "credential_warning": ""}
+
+
 def route_rows():
     return [dict(route, credential_labels=credential_labels(route["rule"].get("credential_ids", []) + route["rule"].get("denied_credential_ids", []))) for route in ROUTES]
 
 
 def payload_for(path, query):
+    if path == f"{API_BASE}/cc":
+        return cc_payload()
     if path == f"{API_BASE}/keys":
         refresh_route_counts()
         return {"keys": key_rows()}
@@ -1941,7 +2005,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # Mirrors the plugin's catalog filtering for model rules; management asks for every model.
             payload = payload_for(parsed.path, query)
-            if self.headers.get("X-CPA-Key-Billing-Models", "").lower() != "all":
+            if self.headers.get("X-CPA-CC-Billing-Models", "").lower() != "all":
                 models, _, _, denied_models, _, _ = account_routing(api_keys.index(authorization[7:]))
                 payload["data"] = [row for row in payload["data"] if (not models or row["id"] in models) and row["id"] not in denied_models]
             self.send_json(200, payload)
@@ -2079,7 +2143,17 @@ class Handler(BaseHTTPRequestHandler):
             self.mutation_view = json.loads(request_body or b"{}")
             request_body = json.dumps(self.mutation_view.get("data") or {}).encode()
         route = self.command, parsed.path
-        if route == ("POST", f"{API_BASE}/auth-files/quota/reset"):
+        if route == ("PUT", f"{API_BASE}/cc/settings"):
+            CC_SETTINGS.clear()
+            CC_SETTINGS.update(json.loads(request_body or b"{}"))
+            self.send_json(200, {"settings": CC_SETTINGS})
+        elif route in {("POST", f"{API_BASE}/cc/refresh"), ("POST", f"{API_BASE}/cc/rebuild")}:
+            self.send_json(200, {"refreshed": True})
+        elif route == ("POST", f"{API_BASE}/prices/import"):
+            body = json.loads(request_body or b"[]")
+            entries = body if isinstance(body, list) else body.get("models", [])
+            self.send_json(200, {"models": len(entries), "model_ids": sum(1 + len(item.get("aliases", [])) for item in entries)})
+        elif route == ("POST", f"{API_BASE}/auth-files/quota/reset"):
             self.reset_auth_quota(parsed, AUTH_FILES)
         elif route == ("POST", "/v0/management/api-call"):
             body = json.loads(request_body or b"{}")

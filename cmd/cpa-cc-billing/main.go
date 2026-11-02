@@ -1,6 +1,6 @@
 //go:build cshared
 
-// Command cpa-key-billing is the C ABI entry point of the CLIProxyAPI plugin.
+// Command cpa-cc-billing is the C ABI entry point of the CLIProxyAPI plugin.
 // It is built with -buildmode=c-shared and contains no logic beyond marshalling
 // between the C boundary and internal/plugin.
 package main

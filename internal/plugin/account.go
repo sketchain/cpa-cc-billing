@@ -200,7 +200,7 @@ func accountScope(headers http.Header) (string, bool) {
 
 func apiKeyUnauthorized() ManagementResponse {
 	response := apiKeyJSONError(http.StatusUnauthorized, "unauthorized", "Invalid API key")
-	response.Headers.Set("WWW-Authenticate", `Bearer realm="cpa-key-billing-account"`)
+	response.Headers.Set("WWW-Authenticate", `Bearer realm="cpa-cc-billing-account"`)
 	return response
 }
 

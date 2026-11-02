@@ -10,7 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const DefaultStateFile = "plugins/cpa-key-billing-state-v1.db"
+const DefaultStateFile = "plugins/cpa-cc-billing-state-v1.db"
 
 const maxRetentionDays = RetentionDays((1<<63 - 1) / (24 * time.Hour))
 

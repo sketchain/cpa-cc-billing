@@ -1,0 +1,841 @@
+package ccbilling
+
+import (
+	"database/sql"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// KeyInfo is what the billing store knows about a downstream key.
+type KeyInfo struct {
+	Preview string
+	Label   string
+	PlanID  string
+	// Weekly describes the key's 7-day plan window; HasWeekly is false when
+	// its plan has none. Amounts are in USD.
+	HasWeekly   bool
+	WeeklyUSD   float64
+	UsedWeekUSD float64
+	CycleStart  time.Time
+	CycleEnd    time.Time
+	// Anchored reports whether the plan's cycles start at a fixed anchor.
+	Anchored bool
+	// PlanRevision changes whenever the key's plan does.
+	PlanRevision string
+}
+
+// Alignment is the outcome of keeping a plan's weekly window on an account's
+// 7-day reset.
+type Alignment struct {
+	Status    string    `json:"status"`
+	WaitUntil time.Time `json:"wait_until,omitzero"`
+}
+
+// Alignment statuses.
+const (
+	AlignAligned     = "aligned"
+	AlignChanged     = "changed"
+	AlignWaiting     = "waiting"
+	AlignUnsupported = "unsupported"
+	AlignNoWindow    = "no_window"
+	AlignUnknown     = "unknown"
+)
+
+// WeeklyPeriod is an account's current 7-day period as its reports tell it.
+type WeeklyPeriod struct {
+	Start, ResetAt time.Time
+	// EarlyResetAt is when the latest early reset was detected, if any.
+	EarlyResetAt time.Time
+}
+
+// Host gives the manager the billing store's data. Every method must be safe
+// to call while the manager holds its own lock, and none may call back into it.
+type Host interface {
+	// WithDB runs fn with the billing database, holding it open.
+	WithDB(fn func(*sql.DB) error) error
+	Now() time.Time
+	ToUSD(amount float64, currency string) float64
+	LatestObservations(authIndexes []string, since time.Time) (map[string]Observation, error)
+	WeeklyPeriod(authIndex string, now time.Time) (WeeklyPeriod, bool, error)
+	KeyInfo(scope string) (KeyInfo, bool)
+	KeyUsageUSD(scope string, from, to time.Time) (float64, error)
+	AlignWeekly(planID string, resetAt time.Time) (Alignment, error)
+	Logf(format string, args ...any)
+}
+
+// accountCache is an account's history as the refresh keeps it.
+type accountCache struct {
+	stream   StreamState
+	segments []Segment
+	buckets  []KBucket
+}
+
+// accountSnapshot is what a refresh computed about an account.
+type accountSnapshot struct {
+	estimate Estimate
+	k        KEstimate
+	weekly   WeeklyPeriod
+	hasWeek  bool
+	cursor   time.Time
+	kCursor  time.Time
+}
+
+// keySnapshot is what a refresh read about an assigned key. Usage observed
+// after the refresh is added from the live deltas.
+type keySnapshot struct {
+	info          KeyInfo
+	known         bool
+	usedFiveHour  float64
+	fiveHourStart time.Time
+	usedCap       float64
+	capFrom       time.Time
+}
+
+// snapshot is everything admission reads. A refresh replaces it as a whole.
+type snapshot struct {
+	at       time.Time
+	seq      uint64
+	settings Settings
+	accounts map[string]accountSnapshot
+	keys     map[string]keySnapshot
+}
+
+type costDelta struct {
+	seq uint64
+	at  time.Time
+	usd float64
+}
+
+// Manager keeps the estimates of every configured account and answers
+// admission and balance questions.
+//
+// Admission and balances only read the latest snapshot and the live
+// utilization; they never wait for a refresh or touch the database. Refreshes
+// run synchronously within host calls that are off the request path
+// (usage.handle and management calls): a usage-triggered refresh is skipped
+// while another runs, and none starts a goroutine.
+type Manager struct {
+	host Host
+
+	// refreshMu serializes refreshes and owns the fields below it.
+	refreshMu   sync.Mutex
+	db          *sql.DB
+	settings    Settings
+	accounts    map[string]*accountCache
+	lastRefresh time.Time
+	lastPrune   time.Time
+
+	snap atomic.Pointer[snapshot]
+
+	liveMu sync.RWMutex
+	latest map[string]Observation
+	deltas map[string][]costDelta
+	seq    atomic.Uint64
+
+	alignMu    sync.Mutex
+	alignments map[string]alignmentEntry
+
+	lastError      atomic.Value
+	loggedUnloaded atomic.Bool
+
+	// RefreshInterval throttles usage-triggered refreshes.
+	RefreshInterval time.Duration
+	// ProcessBudget bounds the history one refresh processes, so a large
+	// backlog is spread over several host calls.
+	ProcessBudget time.Duration
+}
+
+func NewManager(host Host) *Manager {
+	m := &Manager{host: host, accounts: map[string]*accountCache{}, latest: map[string]Observation{},
+		deltas: map[string][]costDelta{}, alignments: map[string]alignmentEntry{}, RefreshInterval: time.Minute, ProcessBudget: 3 * time.Second}
+	m.lastError.Store("")
+	return m
+}
+
+// Loaded reports whether a refresh has produced a snapshot.
+func (m *Manager) Loaded() bool { return m.snap.Load() != nil }
+
+// Settings returns the current settings, loading them on first use.
+func (m *Manager) Settings() (Settings, error) {
+	if snap := m.snap.Load(); snap != nil {
+		return snap.settings, nil
+	}
+	if err := m.Refresh(); err != nil && m.snap.Load() == nil {
+		return Settings{}, err
+	}
+	return m.snap.Load().settings, nil
+}
+
+// SetSettings validates, stores and applies new settings.
+func (m *Manager) SetSettings(next Settings) (Settings, error) {
+	normalized, err := next.Normalized()
+	if err != nil {
+		return Settings{}, err
+	}
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	if err := m.withDB(func(db *sql.DB) error { return saveSettings(db, normalized) }); err != nil {
+		return Settings{}, err
+	}
+	m.settings = normalized
+	m.alignMu.Lock()
+	m.alignments = map[string]alignmentEntry{}
+	m.alignMu.Unlock()
+	return normalized, m.refreshLocked()
+}
+
+// Rebuild discards the stored segments and k evidence and rebuilds them from
+// the retained request history with the current parameters.
+func (m *Manager) Rebuild() error {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	if err := m.withDB(resetStreams); err != nil {
+		return err
+	}
+	m.accounts = map[string]*accountCache{}
+	return m.refreshLocked()
+}
+
+// Refresh processes new history now, waiting for a running refresh. Only
+// management calls use it.
+func (m *Manager) Refresh() error {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	return m.refreshLocked()
+}
+
+// MaybeRefresh refreshes when the interval has passed and no other refresh
+// is running; it never waits.
+func (m *Manager) MaybeRefresh() {
+	if !m.refreshMu.TryLock() {
+		return
+	}
+	defer m.refreshMu.Unlock()
+	if m.snap.Load() != nil && m.host.Now().Sub(m.lastRefresh) < m.RefreshInterval {
+		return
+	}
+	_ = m.refreshLocked()
+}
+
+// Observe records an account's latest report as soon as its usage arrives.
+func (m *Manager) Observe(authIndex string, obs Observation) {
+	authIndex = strings.TrimSpace(authIndex)
+	if authIndex == "" || (!obs.Has5h && !obs.Has7d) {
+		return
+	}
+	m.liveMu.Lock()
+	defer m.liveMu.Unlock()
+	m.latest[authIndex] = mergeLatest(m.latest[authIndex], obs)
+}
+
+// ObserveCost adds the cost of an assigned key's request, made at at, to the
+// usage of the latest snapshot. It is called after the request is stored.
+func (m *Manager) ObserveCost(scope string, at time.Time, usd float64) {
+	snap := m.snap.Load()
+	if snap == nil || usd <= 0 || !finite(usd) {
+		return
+	}
+	if _, assigned := snap.settings.Keys[scope]; !assigned {
+		return
+	}
+	m.liveMu.Lock()
+	defer m.liveMu.Unlock()
+	m.deltas[scope] = append(m.deltas[scope], costDelta{seq: m.seq.Add(1), at: at, usd: usd})
+}
+
+// mergeLatest keeps the newest value of each window. Reports of the same
+// period never lower its utilization: a lower one arrived out of order.
+func mergeLatest(current, next Observation) Observation {
+	merge := func(has *bool, used *float64, reset *time.Time, nextHas bool, nextUsed float64, nextReset time.Time, newer bool) {
+		if !nextHas {
+			return
+		}
+		samePeriod := *has && absDuration(nextReset.Sub(*reset)) <= boundaryJitter
+		switch {
+		case !*has || (newer && !samePeriod && !nextReset.Before(reset.Add(-boundaryJitter))):
+			*has, *used, *reset = true, nextUsed, nextReset
+		case samePeriod && nextUsed > *used:
+			*used = nextUsed
+		}
+	}
+	newer := next.At.After(current.At)
+	merge(&current.Has5h, &current.Used5h, &current.Reset5h, next.Has5h, next.Used5h, next.Reset5h, newer)
+	merge(&current.Has7d, &current.Used7d, &current.Reset7d, next.Has7d, next.Used7d, next.Reset7d, newer)
+	if newer {
+		current.At = next.At
+	}
+	return current
+}
+
+func absDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+// withDB needs refreshMu.
+func (m *Manager) withDB(fn func(*sql.DB) error) error {
+	return m.host.WithDB(func(db *sql.DB) error {
+		if db == nil {
+			return fmt.Errorf("The billing database is not open")
+		}
+		if db != m.db {
+			if err := EnsureSchema(db); err != nil {
+				return err
+			}
+			settings, err := loadSettings(db)
+			if err != nil {
+				return err
+			}
+			m.db, m.settings = db, settings
+			m.accounts = map[string]*accountCache{}
+			m.lastRefresh, m.lastPrune = time.Time{}, time.Time{}
+			m.snap.Store(nil)
+			m.liveMu.Lock()
+			m.latest, m.deltas = map[string]Observation{}, map[string][]costDelta{}
+			m.liveMu.Unlock()
+			m.alignMu.Lock()
+			m.alignments = map[string]alignmentEntry{}
+			m.alignMu.Unlock()
+		}
+		return fn(db)
+	})
+}
+
+// refreshLocked needs refreshMu. It processes new history, recomputes the
+// estimates and publishes a new snapshot.
+func (m *Manager) refreshLocked() error {
+	now := m.host.Now()
+	accounts := map[string]accountSnapshot{}
+	err := m.withDB(func(db *sql.DB) error {
+		params := m.settings.Params
+		cutoff := now.Add(-params.retention())
+		if m.lastPrune.IsZero() || now.Sub(m.lastPrune) > time.Hour {
+			if err := pruneSegments(db, cutoff); err != nil {
+				return err
+			}
+			m.lastPrune = now
+		}
+		deadline := time.Now().Add(m.ProcessBudget)
+		for _, authIndex := range m.settings.authIndexes() {
+			cache := m.accounts[authIndex]
+			if cache == nil {
+				stream, err := loadStream(db, authIndex)
+				if err != nil {
+					return err
+				}
+				segments, err := loadSegments(db, authIndex, cutoff)
+				if err != nil {
+					return err
+				}
+				buckets, err := loadKBuckets(db, authIndex, cutoff)
+				if err != nil {
+					return err
+				}
+				cache = &accountCache{stream: stream, segments: segments, buckets: buckets}
+				m.accounts[authIndex] = cache
+			}
+			if err := m.advance(db, authIndex, cache, now.Add(-ReorderHorizon), deadline); err != nil {
+				return err
+			}
+			first := 0
+			for first < len(cache.segments) && cache.segments[first].At.Before(cutoff) {
+				first++
+			}
+			cache.segments = cache.segments[first:]
+			first = 0
+			for first < len(cache.buckets) && cache.buckets[first].At.Before(cutoff) {
+				first++
+			}
+			cache.buckets = cache.buckets[first:]
+			accounts[authIndex] = accountSnapshot{
+				estimate: EstimateSegments(cache.segments, params, now), k: EstimateK(cache.buckets, params, now),
+				cursor: cache.stream.Cursor, kCursor: cache.stream.K.Cursor,
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		m.recordError(err)
+		return err
+	}
+	indexes := m.settings.authIndexes()
+	if latest, err := m.host.LatestObservations(indexes, now.Add(-Week-time.Hour)); err == nil {
+		m.liveMu.Lock()
+		for index, obs := range latest {
+			m.latest[index] = mergeLatest(m.latest[index], obs)
+		}
+		m.liveMu.Unlock()
+	} else {
+		m.recordError(err)
+	}
+	for _, index := range indexes {
+		account := accounts[index]
+		if period, ok, err := m.host.WeeklyPeriod(index, now); err == nil {
+			account.weekly, account.hasWeek = period, ok
+		}
+		accounts[index] = account
+	}
+	// Usage stored before this point is in the key reads below; later usage
+	// arrives as deltas with a higher sequence.
+	seq := m.seq.Load()
+	snap := &snapshot{at: now, seq: seq, settings: m.settings, accounts: accounts, keys: map[string]keySnapshot{}}
+	for scope, settings := range m.settings.Keys {
+		pool, ok := m.settings.pool(settings.PoolID)
+		if !ok {
+			continue
+		}
+		key := keySnapshot{}
+		key.info, key.known = m.host.KeyInfo(scope)
+		latest := m.latestFor(pool)
+		switch settings.Kind {
+		case KeyFixed:
+			if latest.Has5h && latest.Reset5h.After(now) {
+				key.fiveHourStart = latest.Reset5h.Add(-FiveHours)
+				key.usedFiveHour, _ = m.host.KeyUsageUSD(scope, key.fiveHourStart, now)
+			}
+		case KeyRemainder:
+			if settings.WeeklyCapUSD != nil {
+				key.capFrom = now.Add(-Week)
+				if latest.Has7d && latest.Reset7d.After(now) {
+					key.capFrom = latest.Reset7d.Add(-Week)
+				}
+				key.usedCap, _ = m.host.KeyUsageUSD(scope, key.capFrom, now)
+			}
+		}
+		snap.keys[scope] = key
+	}
+	m.liveMu.Lock()
+	for scope, deltas := range m.deltas {
+		kept := deltas[:0]
+		for _, delta := range deltas {
+			if delta.seq > seq {
+				kept = append(kept, delta)
+			}
+		}
+		if len(kept) == 0 {
+			delete(m.deltas, scope)
+		} else {
+			m.deltas[scope] = kept
+		}
+	}
+	m.liveMu.Unlock()
+	m.snap.Store(snap)
+	m.lastRefresh = now
+	m.lastError.Store("")
+	return nil
+}
+
+// latestFor is the live report of a pool's anchor account.
+func (m *Manager) latestFor(pool Pool) Observation {
+	if len(pool.AuthIndexes) == 0 {
+		return Observation{}
+	}
+	m.liveMu.RLock()
+	defer m.liveMu.RUnlock()
+	return m.latest[pool.AuthIndexes[0]]
+}
+
+func (m *Manager) recordError(err error) {
+	if err.Error() != m.lastError.Load().(string) {
+		m.host.Logf("CC estimation failed: %v", err)
+	}
+	m.lastError.Store(err.Error())
+}
+
+// advance processes an account's history in chunks of at most a day until
+// until, or until the deadline passes. Segments and k evidence keep separate
+// cursors, so k can be rebuilt without touching the segments.
+func (m *Manager) advance(db *sql.DB, authIndex string, cache *accountCache, until, deadline time.Time) error {
+	params := m.settings.Params
+	if cache.stream.Cursor.IsZero() || cache.stream.K.Cursor.IsZero() {
+		var first sql.NullInt64
+		if err := db.QueryRow(`SELECT min(at) FROM quota_report_windows WHERE auth_index = ? AND provider = ?`,
+			authIndex, claudeProvider).Scan(&first); err != nil {
+			return fmt.Errorf("Read Claude quota reports: %w", err)
+		}
+		if !first.Valid {
+			return nil
+		}
+		start := timeAt(first.Int64).Add(-time.Nanosecond)
+		if cache.stream.Cursor.IsZero() {
+			cache.stream.Cursor = start
+		}
+		if cache.stream.K.Cursor.IsZero() {
+			cache.stream.K.Cursor = start
+		}
+	}
+	for {
+		from := cache.stream.Cursor
+		if cache.stream.K.Cursor.Before(from) {
+			from = cache.stream.K.Cursor
+		}
+		if !from.Before(until) {
+			return nil
+		}
+		end := from.Add(24 * time.Hour)
+		if end.After(until) {
+			end = until
+		}
+		observations, err := readObservations(db, authIndex, from, end)
+		if err != nil {
+			return err
+		}
+		next := cache.stream
+		var segments []Segment
+		if next.Cursor.Before(end) {
+			costs, err := readCosts(db, authIndex, next.Cursor, end, m.host.ToUSD)
+			if err != nil {
+				return err
+			}
+			segments = next.Advance(observations, costs, end, params)
+		}
+		var buckets []KBucket
+		if next.K.Cursor.Before(end) {
+			buckets = BucketEvidence(next.K.Advance(observations, end))
+		}
+		if err := commitAdvance(db, authIndex, next, segments, buckets); err != nil {
+			return err
+		}
+		cache.stream = next
+		cache.segments = append(cache.segments, segments...)
+		cache.buckets = mergeBuckets(cache.buckets, buckets)
+		if time.Now().After(deadline) {
+			return nil
+		}
+	}
+}
+
+// live returns copies of the live reports and the deltas newer than snap.
+func (m *Manager) live(snap *snapshot) (map[string]Observation, map[string][]costDelta) {
+	m.liveMu.RLock()
+	defer m.liveMu.RUnlock()
+	latest := make(map[string]Observation, len(m.latest))
+	for index, obs := range m.latest {
+		latest[index] = obs
+	}
+	deltas := make(map[string][]costDelta, len(m.deltas))
+	for scope, items := range m.deltas {
+		for _, delta := range items {
+			if delta.seq > snap.seq {
+				deltas[scope] = append(deltas[scope], delta)
+			}
+		}
+	}
+	return latest, deltas
+}
+
+func deltaSum(deltas []costDelta, from, to time.Time) float64 {
+	sum := 0.0
+	for _, delta := range deltas {
+		if !delta.at.Before(from) && (to.IsZero() || delta.at.Before(to)) {
+			sum += delta.usd
+		}
+	}
+	return sum
+}
+
+func accountStatus(snap *snapshot, latest map[string]Observation, authIndex string, now time.Time) AccountStatus {
+	account := snap.accounts[authIndex]
+	return ResolveAccount(authIndex, snap.settings.Accounts[authIndex], account.estimate, account.k, latest[authIndex], snap.settings.Params, now)
+}
+
+// poolStatus reads only the snapshot and the live state.
+func poolStatus(snap *snapshot, latest map[string]Observation, deltas map[string][]costDelta, pool Pool, now time.Time) PoolStatus {
+	accounts := make([]AccountStatus, 0, len(pool.AuthIndexes))
+	for _, index := range pool.AuthIndexes {
+		accounts = append(accounts, accountStatus(snap, latest, index, now))
+	}
+	var fiveHourStart time.Time
+	if len(accounts) > 0 && accounts[0].Reset5h.After(now) {
+		fiveHourStart = accounts[0].Reset5h.Add(-FiveHours)
+	}
+	var fixed []FixedKeyUsage
+	for _, scope := range sortedKeys(snap.settings.Keys) {
+		settings := snap.settings.Keys[scope]
+		if settings.Kind != KeyFixed || settings.PoolID != pool.ID {
+			continue
+		}
+		usage := FixedKeyUsage{Scope: scope, FiveHourShare: settings.FiveHourShare}
+		key := snap.keys[scope]
+		if info := key.info; key.known && info.HasWeekly {
+			usage.Valid, usage.WeeklyUSD, usage.CycleStart, usage.CycleEnd = true, info.WeeklyUSD, info.CycleStart, info.CycleEnd
+			if !info.CycleStart.After(now) && now.Before(info.CycleEnd) {
+				usage.UsedWeekUSD = info.UsedWeekUSD + deltaSum(deltas[scope], info.CycleStart, info.CycleEnd)
+			}
+			if !fiveHourStart.IsZero() {
+				if fiveHourStart.Equal(key.fiveHourStart) {
+					usage.UsedFiveHour = key.usedFiveHour
+				}
+				usage.UsedFiveHour += deltaSum(deltas[scope], fiveHourStart, time.Time{})
+			}
+		}
+		fixed = append(fixed, usage)
+	}
+	return BuildPool(pool, accounts, fixed)
+}
+
+// remainderCapUsage is a remainder key's usage in the anchor account's
+// current 7-day period, or the last 7 days when it is unknown.
+func remainderCapUsage(snap *snapshot, deltas map[string][]costDelta, scope string, pool PoolStatus, now time.Time) float64 {
+	from := now.Add(-Week)
+	if pool.Reset7d.After(now) {
+		from = pool.Reset7d.Add(-Week)
+	}
+	key := snap.keys[scope]
+	used := 0.0
+	if !key.capFrom.IsZero() && absDuration(key.capFrom.Sub(from)) <= boundaryJitter {
+		used = key.usedCap
+	}
+	return used + deltaSum(deltas[scope], from, time.Time{})
+}
+
+// alignFixed keeps a fixed key's weekly plan window on the anchor account's
+// 7-day reset before quota admission can open a cycle. It only reads memory
+// unless the anchor has to move.
+func (m *Manager) alignFixed(snap *snapshot, scope string, pool Pool) Alignment {
+	if len(pool.AuthIndexes) == 0 {
+		return Alignment{Status: AlignUnknown}
+	}
+	key := snap.keys[scope]
+	if !key.known || key.info.PlanID == "" || !key.info.HasWeekly {
+		return Alignment{Status: AlignNoWindow}
+	}
+	account := snap.accounts[pool.AuthIndexes[0]]
+	if !account.hasWeek || account.weekly.ResetAt.IsZero() {
+		return Alignment{Status: AlignUnknown}
+	}
+	cacheKey := key.info.PlanID + "\x00" + account.weekly.ResetAt.Format(time.RFC3339)
+	now := m.host.Now()
+	m.alignMu.Lock()
+	defer m.alignMu.Unlock()
+	if previous, ok := m.alignments[cacheKey]; ok && previous.current(now, key.info.PlanRevision) {
+		return previous.result
+	}
+	result, err := m.host.AlignWeekly(key.info.PlanID, account.weekly.ResetAt)
+	if err != nil {
+		m.recordError(err)
+		return Alignment{Status: AlignUnknown}
+	}
+	if result.Status == AlignChanged {
+		result.Status = AlignAligned
+	}
+	m.alignments[cacheKey] = alignmentEntry{result: result, revision: key.info.PlanRevision}
+	return result
+}
+
+// alignmentEntry caches an alignment so fixed keys' requests do not ask the
+// store every time: an aligned plan stays aligned for that reset, a waiting
+// one until its running cycles end, and an unsupported one until its plan or
+// the settings change.
+type alignmentEntry struct {
+	result   Alignment
+	revision string
+}
+
+func (e alignmentEntry) current(now time.Time, revision string) bool {
+	switch e.result.Status {
+	case AlignAligned:
+		return true
+	case AlignWaiting:
+		return now.Before(e.result.WaitUntil)
+	case AlignUnsupported:
+		return e.revision == revision
+	}
+	return false
+}
+
+// Admit decides whether the key may send a request now. Keys outside every
+// pool return at once; fixed keys are limited by their subscription plan.
+// Before the first snapshot every key is admitted.
+func (m *Manager) Admit(scope string) Decision {
+	snap := m.snap.Load()
+	if snap == nil {
+		if !m.loggedUnloaded.Swap(true) {
+			m.host.Logf("CC estimates are not loaded yet; admitting requests without CC reservations")
+		}
+		return Decision{Allowed: true}
+	}
+	settings, ok := snap.settings.Keys[scope]
+	if !ok {
+		return Decision{Allowed: true}
+	}
+	pool, found := snap.settings.pool(settings.PoolID)
+	if !found {
+		return Decision{Allowed: true}
+	}
+	now := m.host.Now()
+	if settings.Kind == KeyFixed {
+		m.alignFixed(snap, scope, pool)
+		return Decision{Allowed: true}
+	}
+	latest, deltas := m.live(snap)
+	status := poolStatus(snap, latest, deltas, pool, now)
+	used := 0.0
+	if settings.WeeklyCapUSD != nil {
+		used = remainderCapUsage(snap, deltas, scope, status, now)
+	}
+	return status.AdmitRemainder(settings.WeeklyCapUSD, used)
+}
+
+// Balance outcomes.
+const (
+	BalanceOK = iota
+	BalanceUnassigned
+	BalanceNotReady
+)
+
+// Balance is a key's weekly balance in USD.
+func (m *Manager) Balance(scope string) (float64, int) {
+	snap := m.snap.Load()
+	if snap == nil {
+		return 0, BalanceNotReady
+	}
+	settings, ok := snap.settings.Keys[scope]
+	if !ok {
+		return 0, BalanceUnassigned
+	}
+	pool, found := snap.settings.pool(settings.PoolID)
+	if !found {
+		return 0, BalanceUnassigned
+	}
+	now := m.host.Now()
+	latest, deltas := m.live(snap)
+	if settings.Kind == KeyFixed {
+		m.alignFixed(snap, scope, pool)
+		for _, fixed := range poolStatus(snap, latest, deltas, pool, now).Fixed {
+			if fixed.Scope == scope {
+				return fixed.WeeklyUSD - fixed.UsedWeekUSD, BalanceOK
+			}
+		}
+		return 0, BalanceOK
+	}
+	status := poolStatus(snap, latest, deltas, pool, now)
+	used := 0.0
+	if settings.WeeklyCapUSD != nil {
+		used = remainderCapUsage(snap, deltas, scope, status, now)
+	}
+	return status.RemainderKeyBalance(settings.WeeklyCapUSD, used), BalanceOK
+}
+
+// KeyStatus is one assigned key on the CC page.
+type KeyStatus struct {
+	Scope    string      `json:"scope"`
+	Preview  string      `json:"preview,omitempty"`
+	Label    string      `json:"label,omitempty"`
+	Settings KeySettings `json:"settings"`
+	PlanID   string      `json:"plan_id,omitempty"`
+	// Fixed keys.
+	WeeklyUSD       float64    `json:"weekly_usd"`
+	UsedWeekUSD     float64    `json:"used_week_usd"`
+	UsedFiveHourUSD float64    `json:"used_five_hour_usd"`
+	ReserveFiveHour float64    `json:"reserve_five_hour_usd"`
+	ReserveWeek     float64    `json:"reserve_week_usd"`
+	CycleStart      time.Time  `json:"cycle_start,omitzero"`
+	CycleEnd        time.Time  `json:"cycle_end,omitzero"`
+	Alignment       *Alignment `json:"alignment,omitempty"`
+	Valid           bool       `json:"valid"`
+	// Remainder keys.
+	UsedCapUSD float64 `json:"used_cap_usd"`
+	// Balance is the weekly balance; Reported is what new-api receives.
+	Balance  float64   `json:"balance_usd"`
+	Reported float64   `json:"reported_balance_usd"`
+	Admitted *bool     `json:"admitted,omitempty"`
+	Refusal  string    `json:"refusal,omitempty"`
+	RetryAt  time.Time `json:"retry_at,omitzero"`
+}
+
+// AccountView adds an account's history to its status.
+type AccountView struct {
+	AccountStatus
+	Cursor       time.Time      `json:"cursor,omitzero"`
+	KCursor      time.Time      `json:"k_cursor,omitzero"`
+	WeeklyStart  time.Time      `json:"weekly_start,omitzero"`
+	EarlyResetAt time.Time      `json:"early_reset_at,omitzero"`
+	RecentBlocks []BlockSummary `json:"recent_blocks"`
+}
+
+// View is the CC page.
+type View struct {
+	Settings Settings      `json:"settings"`
+	Defaults Params        `json:"defaults"`
+	Accounts []AccountView `json:"accounts"`
+	Pools    []PoolStatus  `json:"pools"`
+	Keys     []KeyStatus   `json:"keys"`
+	Segments int           `json:"stored_segments"`
+	Error    string        `json:"error,omitempty"`
+	At       time.Time     `json:"at"`
+}
+
+// View refreshes and describes every account, pool and assigned key. It is a
+// management call, so it may wait for a running refresh.
+func (m *Manager) View() (View, error) {
+	if err := m.Refresh(); err != nil && m.snap.Load() == nil {
+		return View{}, err
+	}
+	snap := m.snap.Load()
+	now := m.host.Now()
+	view := View{Settings: snap.settings, Defaults: DefaultParams(), Accounts: []AccountView{}, Pools: []PoolStatus{}, Keys: []KeyStatus{},
+		Error: m.lastError.Load().(string), At: now}
+	m.refreshMu.Lock()
+	_ = m.withDB(func(db *sql.DB) error {
+		view.Segments, _ = segmentStats(db)
+		return nil
+	})
+	m.refreshMu.Unlock()
+	latest, deltas := m.live(snap)
+	for _, index := range snap.settings.authIndexes() {
+		account := AccountView{AccountStatus: accountStatus(snap, latest, index, now), RecentBlocks: []BlockSummary{}}
+		cached := snap.accounts[index]
+		account.Cursor, account.KCursor = cached.cursor, cached.kCursor
+		if cached.hasWeek {
+			account.WeeklyStart, account.EarlyResetAt = cached.weekly.Start, cached.weekly.EarlyResetAt
+		}
+		blocks := cached.estimate.Blocks
+		account.RecentBlocks = slices.Clone(blocks[max(0, len(blocks)-20):])
+		slices.Reverse(account.RecentBlocks)
+		view.Accounts = append(view.Accounts, account)
+	}
+	pools := map[string]PoolStatus{}
+	for _, pool := range snap.settings.Pools {
+		status := poolStatus(snap, latest, deltas, pool, now)
+		pools[pool.ID] = status
+		view.Pools = append(view.Pools, status)
+	}
+	for _, scope := range sortedKeys(snap.settings.Keys) {
+		settings := snap.settings.Keys[scope]
+		key := KeyStatus{Scope: scope, Settings: settings}
+		if cached := snap.keys[scope]; cached.known {
+			key.Preview, key.Label, key.PlanID = cached.info.Preview, cached.info.Label, cached.info.PlanID
+		}
+		pool := pools[settings.PoolID]
+		poolSettings, _ := snap.settings.pool(settings.PoolID)
+		if settings.Kind == KeyFixed {
+			alignment := m.alignFixed(snap, scope, poolSettings)
+			key.Alignment = &alignment
+			for _, fixed := range pool.Fixed {
+				if fixed.Scope == scope {
+					key.Valid, key.WeeklyUSD, key.UsedWeekUSD = fixed.Valid, fixed.WeeklyUSD, fixed.UsedWeekUSD
+					key.UsedFiveHourUSD, key.ReserveFiveHour, key.ReserveWeek = fixed.UsedFiveHour, fixed.ReserveFiveHour, fixed.RemainingWeek
+					key.CycleStart, key.CycleEnd, key.Balance = fixed.CycleStart, fixed.CycleEnd, fixed.BalanceAvailable
+				}
+			}
+		} else {
+			key.Valid = true
+			if settings.WeeklyCapUSD != nil {
+				key.UsedCapUSD = remainderCapUsage(snap, deltas, scope, pool, now)
+			}
+			key.Balance = pool.RemainderKeyBalance(settings.WeeklyCapUSD, key.UsedCapUSD)
+			decision := pool.AdmitRemainder(settings.WeeklyCapUSD, key.UsedCapUSD)
+			key.Admitted, key.Refusal, key.RetryAt = &decision.Allowed, decision.Reason, decision.RetryAt
+		}
+		key.Reported = ReportedBalance(key.Balance)
+		view.Keys = append(view.Keys, key)
+	}
+	return view, nil
+}
