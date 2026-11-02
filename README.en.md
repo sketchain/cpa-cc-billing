@@ -59,7 +59,7 @@ flowchart TB
 
 - **Account**: one Claude OAuth credential in CPA (by `auth_index`), estimated on its own.
 - **Pool**: a set of accounts that fixed and remainder keys share; its remaining capacity is the sum of its accounts'. The first account anchors the pool's weekly cycles and 5-hour window.
-- **Fixed key**: bound, on the API Key page, to a subscription plan with a **7-day amount window**; that amount is its weekly quota.
+- **Fixed key**: bound, on the API Key page, to a subscription plan with a **7-day amount window**; that amount is its weekly quota. **Give each fixed key a plan of its own**: aligning cycles changes the plan itself, which affects every key bound to it.
 - **Remainder key**: may only use what the pool has left after the fixed keys' reservations, optionally under its own weekly cap.
 
 ### Estimation
@@ -70,7 +70,7 @@ Anthropic reports `anthropic-ratelimit-unified-5h-utilization` and `7d-utilizati
 2. **Blocks**: segments whose data points are at most 5 minutes apart; a 5-hour reset always breaks a block.
 3. **Contamination filtering**: 8-point windows slide segment by segment; a window whose ratio (points per USD) exceeds the reference by 20% is suspicious, and a segment is excluded when at least 50% of the windows covering it are suspicious. The reference is the global weighted average, or the block's own iterative average while there is no history. Outside usage only raises ratios, so filtering only errs conservatively. Blocks narrower than one window are judged as a whole against the global reference.
 4. **Global average**: clean block ratios weighted by `(clean gain)^p`; blocks of the last 14 days weigh 90%, older ones 10%. `T_5h = 100 / ratio`.
-5. **k = weekly / 5-hour total**: paired 5-hour and 7-day gains between consecutive reports in which neither window reset; once the 7-day gain reaches 10 points, `k = Σ5h / Σ7d`. A manual value overrides it. `T_week = k × T_5h`.
+5. **k = weekly / 5-hour total**: paired 5-hour and 7-day gains between consecutive reports in which neither window reset, stored in hourly buckets with the segment retention. Like the totals, k is time-weighted: the last 14 days and older evidence each give `k = Σ5h / Σ7d`, valid once that group's 7-day gain reaches 10 points; two valid groups combine 90% / 10%, one valid group is used alone, otherwise the combined ratio counts if the total is enough, and without that there is no k. A manual value overrides it. `T_week = k × T_5h`.
 6. **Cold start**: with fewer than 20 clean blocks, the tier's default weekly total applies (Pro $250, Max 5x $1250, Max 20x $2500). CPA's Claude credential files carry no tier, so choose it per account on the page (unset counts as Pro). In cold start `T_5h = default / k`; without a manual k and before k is estimated, 5-hour reservations stay off.
 
 On synthetic data (whole-percent reports, concurrency, sporadic and sustained outside usage, 5-hour resets) the 5-hour total is within about +0.3% on clean data and about −3% (conservative) under sustained outside usage; k is within 1%.
@@ -81,6 +81,7 @@ On synthetic data (whole-percent reports, concurrency, sporadic and sustained ou
 - Per pool: `P_week = Σ fixed max(0, weekly − used this cycle)`; each fixed key reserves `max(0, min(weekly / k − used this 5h window, weekly remaining))` for 5 hours (the `1/k` share can be overridden per key).
 - A remainder key is admitted only when `Σ R_week > P_week` and, when 5-hour reservations are on, `Σ R_5h > Σ 5-hour reservations`. Refusals use the plugin's usual `429 rate_limit_error`; the message names the weekly reservation, the 5-hour reservation or the key's own weekly cap, and `Retry-After` points at that window's reset.
 - Fixed keys are only limited by their plan.
+- Admission only reads an in-memory snapshot: keys outside every pool are admitted without touching the estimator; pooled keys combine the snapshot's totals with live utilization and live costs from usage callbacks, with no database query and no wait for a refresh. Refreshes run synchronously at startup, from usage callbacks (after the request, at most once a minute, skipped while one runs) and from the page's buttons; the plugin starts no background thread. Until the first snapshot loads, every request is admitted (logged once) and the balance endpoint returns 503.
 
 ### Fixed key cycles
 
