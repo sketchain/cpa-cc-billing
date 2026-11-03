@@ -139,6 +139,8 @@ type Manager struct {
 	alignMu    sync.Mutex
 	alignments map[string]alignmentEntry
 
+	panel atomic.Pointer[PanelSettings]
+
 	lastError      atomic.Value
 	loggedUnloaded atomic.Bool
 
@@ -292,7 +294,14 @@ func (m *Manager) withDB(fn func(*sql.DB) error) error {
 			if err != nil {
 				return err
 			}
+			panel, err := loadPanelSettings(db)
+			if err != nil {
+				// Page preferences must not stop the estimates.
+				m.host.Logf("%v; using the default page settings", err)
+				panel = DefaultPanelSettings()
+			}
 			m.db, m.settings = db, settings
+			m.panel.Store(&panel)
 			m.accounts = map[string]*accountCache{}
 			m.lastRefresh, m.lastPrune = time.Time{}, time.Time{}
 			m.snap.Store(nil)
@@ -838,4 +847,52 @@ func (m *Manager) View() (View, error) {
 		view.Keys = append(view.Keys, key)
 	}
 	return view, nil
+}
+
+// AccountSummary is a pooled account's estimate as the auth files page shows it.
+type AccountSummary struct {
+	Pools             []string `json:"pools"`
+	Tier              string   `json:"tier"`
+	FiveHourTotal     float64  `json:"five_hour_total_usd"`
+	WeeklyTotal       float64  `json:"weekly_total_usd"`
+	TotalsFrom        string   `json:"totals_from"`
+	K                 *float64 `json:"k,omitempty"`
+	KSource           string   `json:"k_source"`
+	RemainingWeek     float64  `json:"remaining_week_usd"`
+	RemainingFiveHour float64  `json:"remaining_five_hour_usd"`
+	ColdStart         bool     `json:"cold_start"`
+	CleanBlocks       int      `json:"clean_blocks"`
+	ColdStartBlocks   int      `json:"cold_start_blocks"`
+}
+
+// AccountSummaries describes the accounts of every pool from the latest
+// snapshot and live reports. It never refreshes or touches the database, and
+// returns nil before the first snapshot.
+func (m *Manager) AccountSummaries() map[string]AccountSummary {
+	snap := m.snap.Load()
+	if snap == nil {
+		return nil
+	}
+	now := m.host.Now()
+	latest, _ := m.live(snap)
+	result := map[string]AccountSummary{}
+	for _, pool := range snap.settings.Pools {
+		name := pool.Name
+		if name == "" {
+			name = pool.ID
+		}
+		for _, index := range pool.AuthIndexes {
+			summary, ok := result[index]
+			if !ok {
+				status := accountStatus(snap, latest, index, now)
+				summary = AccountSummary{Tier: status.Tier, FiveHourTotal: status.FiveHourTotal, WeeklyTotal: status.WeeklyTotal,
+					TotalsFrom: status.TotalsFrom, K: status.K, KSource: status.KSource, RemainingWeek: status.RemainingWeek,
+					RemainingFiveHour: status.RemainingFiveHour, ColdStart: status.ColdStart, CleanBlocks: status.CleanBlocks,
+					ColdStartBlocks: snap.settings.Params.ColdStartBlocks}
+			}
+			summary.Pools = append(summary.Pools, name)
+			result[index] = summary
+		}
+	}
+	return result
 }

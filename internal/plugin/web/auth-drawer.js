@@ -51,6 +51,9 @@ function renderAuthDrawerFile() {
     )
   );
   renderAuthDrawerResets(file, authDrawer.account);
+  const cc = !authDrawer.account && file.cc;
+  $("auth-drawer-cc-section").classList.toggle("hidden", !cc);
+  $("auth-drawer-cc").replaceChildren(...(cc ? [renderCCAuthSummary(cc, false)] : []));
 }
 
 function renderAuthDrawerResets(file, account) {
@@ -164,7 +167,11 @@ function renderAuthDrawerPeriods() {
   const window = history.windows[selected];
   $("auth-drawer-periods").replaceChildren(
     window
-      ? el("div", { class: "quota-period-list" }, window.periods.map((period) => renderQuotaPeriod(period, file.category, account)))
+      ? el(
+          "div",
+          { class: "quota-period-list" },
+          window.periods.map((period) => renderQuotaPeriod(period, file.category, account, !account && !file.cc))
+        )
       : el("div", { class: "muted small", text: m("ui.no_quota_windows_reported") })
   );
 }
@@ -189,8 +196,9 @@ function authPlanTone(category, plan) {
   return Object.entries(AUTH_PLAN_TONES[category] || {}).find(([, plans]) => plans.includes(key))?.[0] || "plain";
 }
 
-// Estimates need the usage of every request, which API key views do not have.
-function renderQuotaPeriod(period, category, account) {
+// Estimates need the usage of every request, which API key views do not have. Pooled
+// Claude accounts show the CC split's estimate above the periods instead.
+function renderQuotaPeriod(period, category, account, projected = !account) {
   const remaining = Math.max(0, 100 - period.used_percent);
   const end = period.end || period.reset_at;
   const [tone, reason] = QUOTA_PERIOD_ENDS[period.end_reason] || ["ok", "ui.quota_period_running"];
@@ -216,7 +224,7 @@ function renderQuotaPeriod(period, category, account) {
         renderQuotaMetrics(period.usage),
         period.usage.tokens > 0 ? modelUsageTooltip(account, period.usage_query) : null
       ),
-      !account && usage(m("ui.quota_projected"), renderQuotaMetrics(period.usage, quotaEstimateScale(period.used_percent, period.usage))),
+      projected && usage(m("ui.quota_projected"), renderQuotaMetrics(period.usage, quotaEstimateScale(period.used_percent, period.usage))),
       period.plans?.length > 0 &&
         el(
           "span",

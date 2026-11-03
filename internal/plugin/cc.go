@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -25,6 +26,7 @@ const (
 	routeCCRebuild = "/cc/rebuild"
 	routeBalance   = "/balance"
 	routePriceJSON = "/prices/import"
+	routePanel     = "/panel-settings"
 
 	weekSeconds = int64(7 * 24 * 60 * 60)
 )
@@ -36,6 +38,8 @@ func init() {
 		managementEndpoint{http.MethodPost, routeCCRefresh, "Process new usage into CC estimates", (*App).ccRefresh},
 		managementEndpoint{http.MethodPost, routeCCRebuild, "Rebuild CC segments from the retained request history", (*App).ccRebuild},
 		managementEndpoint{http.MethodPost, routePriceJSON, "Import custom model prices from a JSON price list", (*App).importPriceList},
+		managementEndpoint{http.MethodGet, routePanel, "View the page display and API key self-service settings", (*App).panelSettings},
+		managementEndpoint{http.MethodPut, routePanel, "Update the page display and API key self-service settings", (*App).putPanelSettings},
 	)
 	resourceEndpoints = append(resourceEndpoints, resourceEndpoint{routeBalance, (*App).ccBalance})
 }
@@ -444,4 +448,54 @@ func (a *App) importPriceList(req ManagementRequest) ManagementResponse {
 		}
 	}
 	return JSONResponse(http.StatusOK, map[string]any{"models": models, "model_ids": len(prices)})
+}
+
+func (a *App) panelSettings(_ ManagementRequest) ManagementResponse {
+	return JSONResponse(http.StatusOK, map[string]any{"settings": a.cc.PanelSettings(), "tabs": ccbilling.PanelTabs})
+}
+
+func (a *App) putPanelSettings(req ManagementRequest) ManagementResponse {
+	var settings ccbilling.PanelSettings
+	if err := decodeStrict(req.Body, &settings); err != nil {
+		return errorResponse(err)
+	}
+	stored, err := a.cc.SetPanelSettings(settings)
+	if err != nil {
+		return JSONError(http.StatusBadRequest, "invalid", err.Error())
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"settings": stored, "tabs": ccbilling.PanelTabs})
+}
+
+// ccResourceAllowed reports whether an API key resource route is served. When
+// self-service is off, only the balance query new-api uses remains.
+func (a *App) ccResourceAllowed(suffix string) bool {
+	return suffix == routeBalance || a.cc == nil || a.cc.PanelSettings().AccountSelfService
+}
+
+// uiAccountAccessOn marks the page template's API key sign-in entry, which the
+// page hides when self-service is off. The page cannot ask before sign-in.
+var (
+	uiAccountAccessOn  = []byte(`data-account-access="on"`)
+	uiAccountAccessOff = []byte(`data-account-access="off"`)
+)
+
+func (a *App) ccUIHTML() []byte {
+	if a.cc == nil || a.cc.PanelSettings().AccountSelfService {
+		return uiHTML
+	}
+	return bytes.Replace(uiHTML, uiAccountAccessOn, uiAccountAccessOff, 1)
+}
+
+// ccAttachAuthFiles adds the CC estimate of pooled Claude accounts to the auth
+// files page. It reads the latest snapshot only.
+func (a *App) ccAttachAuthFiles(views []authFileView) {
+	if a.cc == nil {
+		return
+	}
+	summaries := a.cc.AccountSummaries()
+	for i := range views {
+		if summary, ok := summaries[views[i].AuthIndex]; ok && views[i].Category == "claude" {
+			views[i].CC = &summary
+		}
+	}
 }

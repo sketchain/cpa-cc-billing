@@ -205,6 +205,9 @@ async function startAdmin(key) {
   await activateCredentialScope(false, key);
   if (generation !== sessionGeneration) throw new StaleRequestError();
   restoreRolePreferences("admin");
+  await readPanelSettings(true);
+  if (generation !== sessionGeneration) throw new StaleRequestError();
+  applyAdminTabVisibility();
   const route = pageRoute();
   setAdminTab(route.role === "admin" ? route.tab : "keys");
   $("gate").classList.add("hidden");
@@ -298,6 +301,7 @@ function resetRoleData(role) {
     adminUIState = emptyAdminUIState();
     expandedPluginLogIDs.clear();
     resourceGroups.admin.configuration.syncErrors = [];
+    panelQuery.clear();
     keyDirectory.clear();
   }
   for (const entry of Object.values(resources[role])) Object.assign(entry, { value: null, error: "", readAt: 0 });
@@ -419,7 +423,7 @@ function setAccountTab(tab) {
 const TABS = Array.from(document.querySelectorAll(".tabs button[data-tab]"));
 function setAdminTab(name) {
   if (editors.get($("route-picker"))?.saving || activeTableSelection?.busy) return;
-  const selected = ADMIN_TAB_IDS.includes(name) ? name : "keys";
+  const selected = ADMIN_TAB_IDS.includes(name) && !hiddenAdminTabs().has(name) ? name : firstVisibleAdminTab();
   if (selected !== activeTab(false)) clearTableSelection();
   if (selected !== "keys") $("route-picker").close();
   writePageRoute("admin", selected);
@@ -429,7 +433,7 @@ function setAdminTab(name) {
     tab.setAttribute("aria-current", active ? "page" : "false");
   }
   $("page-tab-select").value = selected;
-  const visible = selected === "settings" ? new Set(["plans", "routes", "prices", "plugin-logs"]) : new Set([selected]);
+  const visible = selected === "settings" ? new Set(["display", "plans", "routes", "prices", "plugin-logs"]) : new Set([selected]);
   for (const section of document.querySelectorAll('#app > section[id^="tab-"]')) {
     section.classList.toggle("hidden", !visible.has(section.id.slice("tab-".length)));
   }
@@ -585,7 +589,7 @@ for (const role of ["admin", "account"]) {
     .forEach((placeholder) => placeholder.replaceWith(actionIcon(placeholder.dataset.lucideIcon, placeholder.className)));
   updateThemeButtons();
   try {
-    if (embedded && panelKey && initialRoute.role !== "account") {
+    if (embedded && panelKey && loginMode !== "account") {
       await startAdmin(panelKey);
       return;
     }

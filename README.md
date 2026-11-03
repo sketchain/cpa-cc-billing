@@ -119,6 +119,10 @@ Anthropic 响应头 `anthropic-ratelimit-unified-5h-utilization` / `7d-utilizati
 | 账号档位、手动 k | 未设置 / 自动 | 按账号 |
 | key 类型、池、5h 预留比例、余量 key 周上限 | — | 按 key |
 
+### 认证文件页
+
+加入 CC 分账池的 Claude 账号，在认证文件页打开「额度预估」后，以及在详情抽屉里，显示 CC 分账的结果：5h 总额、周总额、k（自动/手动）、R 周 / R 5h 和冷启动状态，取代按「已用量 × 100 / 已用百分比」推算的预估额度。数据取自最近一次估算快照，打开页面不会触发估算刷新。其他账号保持原样。
+
 ### 给 new-api 用的余额接口
 
 ```text
@@ -239,6 +243,11 @@ http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-cc-billing/ui
 ```text
 http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-cc-billing/ui#account
 ```
+
+设置页的「页面显示」卡片保存在数据库里，升级后自动带上默认值：
+
+- 勾选的标签页不在导航中显示（「设置」不能隐藏），默认隐藏「AI 供应商」。只影响显示，对应的管理接口照常工作。
+- 「允许 API Key 用户自助查询」默认开启。关闭后登录页不再显示 API Key 入口，自助页用到的资源路由一律返回 404；`/balance` 余额接口不受影响。
 
 ## 计费与订阅规则
 

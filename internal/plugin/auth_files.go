@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"cpa-key-billing/internal/billing"
+	"cpa-key-billing/internal/ccbilling"
 	"cpa-key-billing/internal/messages"
 )
 
@@ -70,6 +71,8 @@ type authFileView struct {
 	CacheRevision      string                       `json:"cache_revision,omitempty"`
 	Usage              billing.CredentialUsageStats `json:"usage"`
 	Quota              *authQuotaResponse           `json:"quota,omitempty"`
+	// CC is the CC split estimate of a pooled Claude account, for operators.
+	CC *ccbilling.AccountSummary `json:"cc,omitempty"`
 }
 
 type authFileListResponse struct {
@@ -301,6 +304,9 @@ func (a *App) listAuthFiles(access viewAccess, from, to time.Time) ([]authFileVi
 	}
 	if errUsage := a.attachQuotaUsage(access.usageScope(), quotas); errUsage != nil {
 		return nil, errUsage
+	}
+	if !access.APIKey {
+		a.ccAttachAuthFiles(views)
 	}
 	sort.SliceStable(views, func(i, j int) bool {
 		left, right := authCategoryOrder(views[i].Category), authCategoryOrder(views[j].Category)

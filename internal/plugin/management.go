@@ -188,7 +188,7 @@ func (a *App) handleManagement(raw []byte) ([]byte, error) {
 						"font-src https://cdn.jsdelivr.net; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
 				},
 			},
-			Body: uiHTML,
+			Body: a.ccUIHTML(),
 		})
 	}
 	if path != resourceBase && strings.HasPrefix(path, resourceBase+"/") {

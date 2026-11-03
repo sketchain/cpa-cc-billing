@@ -84,7 +84,7 @@ func (a *App) routeResource(req ManagementRequest, suffix string) ManagementResp
 			break
 		}
 	}
-	if handler == nil {
+	if handler == nil || !a.ccResourceAllowed(suffix) {
 		return apiKeyJSONError(http.StatusNotFound, "not_found", "Resource route not found: "+req.Method+" "+req.Path)
 	}
 	access, ok := a.apiKeyViewAccess(req)

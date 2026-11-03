@@ -22,7 +22,7 @@
       /*theme.js*/
     </script>
   </head>
-  <body>
+  <body data-account-access="on">
     <div class="wrap">
       <section id="gate" class="card gate hidden" aria-labelledby="gate-title">
         <div class="gate-top">
@@ -139,6 +139,13 @@
         </section>
 
         <section id="tab-analysis" class="hidden"><div id="analysis-body"></div></section>
+
+        <section id="tab-display" class="hidden">
+          <div class="card">
+            <div class="row spread settings-section-header"><h2 data-i18n="panel.title">Page display</h2></div>
+            <div id="panel-body"></div>
+          </div>
+        </section>
 
         <section id="tab-plans" class="hidden">
           <div class="card">
@@ -555,7 +562,7 @@
     <footer class="page-footer">
       <span>© 2026 <a href="https://github.com/sketchain/cpa-cc-billing" target="_blank" rel="noopener noreferrer">CPA CC Billing</a></span>
       <span>&thinsp;·&thinsp;<a href="https://github.com/sketchain/cpa-cc-billing/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" data-i18n="ui.license">License</a></span>
-      <span>&thinsp;·&thinsp;<span data-i18n="ui.version">Version</span>: v0.1.0</span>
+      <span>&thinsp;·&thinsp;<span data-i18n="ui.version">Version</span>: v0.1.1</span>
     </footer>
 
     <div id="notice" class="notice" popover="manual"></div>
@@ -681,6 +688,10 @@
           </div>
           <div id="auth-drawer-resets"></div>
         </section>
+        <section id="auth-drawer-cc-section" class="drawer-section hidden" aria-labelledby="auth-drawer-cc-title">
+          <h3 id="auth-drawer-cc-title" data-i18n="cc.auth_estimate_title">CC split estimate</h3>
+          <div id="auth-drawer-cc"></div>
+        </section>
         <section class="drawer-section" aria-labelledby="auth-drawer-windows-title">
           <h3 id="auth-drawer-windows-title" data-i18n="ui.quota_windows">Quota windows</h3>
           <div id="auth-drawer-window-switch" class="segmented-control" role="tablist" aria-labelledby="auth-drawer-windows-title"></div>
@@ -737,6 +748,7 @@
       /*ai-providers.js*/
       /*account.js*/
       /*cc.js*/
+      /*panel.js*/
       /*app.js*/
     </script>
   </body>
