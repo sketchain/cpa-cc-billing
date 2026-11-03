@@ -1383,7 +1383,7 @@ assert_cc_split() {
   management_call POST "$port" "$base/keys/sync" -H "Content-Type: application/json" \
     --data "$(jq -nc --arg a "$remainder_key" --arg b "$fixed_key" '{keys: [$a, $b], allow_empty: true}')" >/dev/null
   management_call GET "$port" "$base/keys" >"$runtime_dir/cc-keys.json"
-  fixed_scope="$(jq -er --arg preview "${fixed_key:0:7}" 'first(.keys[] | select(.in_config and (.preview | startswith($preview))) | .scope)' "$runtime_dir/cc-keys.json")"
+  fixed_scope="$(jq -er --arg preview "${fixed_key:0:6}" 'first(.keys[] | select(.in_config and (.preview | startswith($preview))) | .scope)' "$runtime_dir/cc-keys.json")"
   remainder_scope="$(jq -er --arg scope "$fixed_scope" 'first(.keys[] | select(.in_config and .scope != $scope) | .scope)' "$runtime_dir/cc-keys.json")"
   management_call GET "$port" "/v0/management/claude-api-key" >"$runtime_dir/cc-claude-keys.json"
   auth_index="$(jq -er '.["claude-api-key"][0]["auth-index"]' "$runtime_dir/cc-claude-keys.json")"
