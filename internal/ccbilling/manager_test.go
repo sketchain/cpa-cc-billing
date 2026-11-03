@@ -2,8 +2,12 @@ package ccbilling
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"math"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,6 +31,13 @@ type fakeHost struct {
 	weekly *WeeklyPeriod
 	align  Alignment
 	aligns atomic.Int64
+	// usage, seq and usageErr configure KeyUsageUSD; weeklyErr fails WeeklyPeriod.
+	usage     map[string]float64
+	seq       uint64
+	usageErr  error
+	weeklyErr error
+	dbErr     error
+	logs      []string
 }
 
 func newFakeHost(t *testing.T) *fakeHost {
@@ -43,11 +54,15 @@ func newFakeHost(t *testing.T) *fakeHost {
 			at INTEGER, used_percent REAL, reset_at INTEGER);`); err != nil {
 		t.Fatal(err)
 	}
-	return &fakeHost{db: db, now: time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC), entered: make(chan struct{}, 16), keys: map[string]KeyInfo{}}
+	return &fakeHost{db: db, now: time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC), entered: make(chan struct{}, 16), keys: map[string]KeyInfo{},
+		usage: map[string]float64{}}
 }
 
 func (h *fakeHost) WithDB(fn func(*sql.DB) error) error {
 	h.calls.Add(1)
+	if h.dbErr != nil {
+		return h.dbErr
+	}
 	if gate := h.gate.Load(); gate != nil {
 		h.entered <- struct{}{}
 		<-*gate
@@ -62,6 +77,9 @@ func (h *fakeHost) LatestObservations([]string, time.Time) (map[string]Observati
 }
 func (h *fakeHost) WeeklyPeriod(string, time.Time) (WeeklyPeriod, bool, error) {
 	h.calls.Add(1)
+	if h.weeklyErr != nil {
+		return WeeklyPeriod{}, false, h.weeklyErr
+	}
 	if h.weekly != nil {
 		return *h.weekly, true, nil
 	}
@@ -70,11 +88,17 @@ func (h *fakeHost) WeeklyPeriod(string, time.Time) (WeeklyPeriod, bool, error) {
 func (h *fakeHost) KeyInfo(scope string) (KeyInfo, bool) {
 	h.calls.Add(1)
 	info, ok := h.keys[scope]
+	if info.Seq == 0 {
+		info.Seq = h.seq
+	}
 	return info, ok
 }
-func (h *fakeHost) KeyUsageUSD(string, time.Time, time.Time) (float64, error) {
+func (h *fakeHost) KeyUsageUSD(scope string, _, _ time.Time) (float64, uint64, error) {
 	h.calls.Add(1)
-	return 0, nil
+	if h.usageErr != nil {
+		return 0, 0, h.usageErr
+	}
+	return h.usage[scope], h.seq, nil
 }
 func (h *fakeHost) AlignWeekly(string, time.Time) (Alignment, error) {
 	h.calls.Add(1)
@@ -84,7 +108,9 @@ func (h *fakeHost) AlignWeekly(string, time.Time) (Alignment, error) {
 	}
 	return h.align, nil
 }
-func (h *fakeHost) Logf(string, ...any) {}
+func (h *fakeHost) Logf(format string, args ...any) {
+	h.logs = append(h.logs, fmt.Sprintf(format, args...))
+}
 
 func configuredManager(t *testing.T) (*Manager, *fakeHost) {
 	t.Helper()
@@ -131,7 +157,7 @@ func TestAdmissionIsNotBlockedByARunningRefresh(t *testing.T) {
 				decisions[i] = manager.Admit("remainder")
 			default:
 				manager.MaybeRefresh() // a usage callback during the backfill skips it
-				manager.ObserveCost("fixed", host.now, 1)
+				manager.ObserveCost("fixed", host.now, 1, 1)
 				decisions[i] = manager.Admit("remainder")
 			}
 		}()
@@ -169,7 +195,7 @@ func TestUnassignedKeysNeverTouchTheEstimator(t *testing.T) {
 		if _, status := manager.Balance("unassigned"); status != BalanceUnassigned {
 			t.Fatalf("unassigned balance status = %d", status)
 		}
-		manager.ObserveCost("unassigned", host.now, 1)
+		manager.ObserveCost("unassigned", host.now, 1, 1)
 	}
 	if after := host.calls.Load(); after != before {
 		t.Fatalf("unassigned keys made %d host calls", after-before)
@@ -194,13 +220,14 @@ func TestLiveCostsReachFixedKeyUsageWithoutARefresh(t *testing.T) {
 	if err := manager.Refresh(); err != nil {
 		t.Fatal(err)
 	}
-	manager.ObserveCost("fixed", host.now, 30)
+	manager.ObserveCost("fixed", host.now, 30, 1)
 	manager.MaybeRefresh() // throttled: the snapshot stays
 	balance, status := manager.Balance("fixed")
 	if status != BalanceOK || balance != 70 {
 		t.Fatalf("fixed balance = %v (%d)", balance, status)
 	}
 	// A refresh that reads the stored usage drops the delta it covers.
+	host.seq = 1
 	host.keys["fixed"] = KeyInfo{PlanID: "plan", HasWeekly: true, WeeklyUSD: 100, UsedWeekUSD: 30, CycleStart: host.now.Add(-time.Hour), CycleEnd: host.now.Add(48 * time.Hour)}
 	if err := manager.Refresh(); err != nil {
 		t.Fatal(err)
@@ -330,5 +357,152 @@ func TestAlignmentResultsAreCached(t *testing.T) {
 	manager2.Admit("fixed")
 	if calls := host2.aligns.Load(); calls != 3 {
 		t.Fatalf("after saving settings: AlignWeekly calls = %d, want 3", calls)
+	}
+}
+
+func TestSettingsWithoutASnapshotRefuseRemainderKeys(t *testing.T) {
+	manager, _ := configuredManager(t)
+	manager.snap.Store(nil)
+	decision := manager.Admit("remainder")
+	if decision.Allowed || decision.Reason != RefusedNotLoaded || decision.Detail.Key == "" || decision.RetryAt.IsZero() {
+		t.Fatalf("remainder before the snapshot = %+v", decision)
+	}
+	for _, scope := range []string{"fixed", "unassigned"} {
+		if decision := manager.Admit(scope); !decision.Allowed {
+			t.Fatalf("%s before the snapshot = %+v", scope, decision)
+		}
+	}
+	view, err := manager.View()
+	if err != nil || !view.Loaded {
+		t.Fatalf("view after a refresh = %+v, %v", view.Loaded, err)
+	}
+
+	// The operator can keep admitting remainder keys instead.
+	settings, _ := manager.Settings()
+	settings.Params.RefuseUnloaded = false
+	if _, err := manager.SetSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	manager.snap.Store(nil)
+	if decision := manager.Admit("remainder"); !decision.Allowed {
+		t.Fatalf("remainder with the switch off = %+v", decision)
+	}
+}
+
+func TestViewReportsMissingEstimates(t *testing.T) {
+	manager, host := configuredManager(t)
+	manager.snap.Store(nil)
+	host.dbErr = errors.New("database is locked")
+	view, err := manager.View()
+	if err != nil || view.Loaded || len(view.Settings.Keys) != 2 || view.Error == "" {
+		t.Fatalf("view without estimates = %+v, %v", view, err)
+	}
+	if decision := manager.Admit("remainder"); decision.Reason != RefusedNotLoaded {
+		t.Fatalf("remainder = %+v", decision)
+	}
+}
+
+func TestAlignedPlansAreCheckedAgainAfterAPlanChange(t *testing.T) {
+	manager, host := configuredManager(t)
+	host.weekly = &WeeklyPeriod{Start: host.now.Add(-24 * time.Hour), ResetAt: host.now.Add(6 * 24 * time.Hour)}
+	host.keys["fixed"] = KeyInfo{PlanID: "plan", HasWeekly: true, WeeklyUSD: 100, PlanRevision: "r1",
+		CycleStart: host.now.Add(-time.Hour), CycleEnd: host.now.Add(48 * time.Hour)}
+	if err := manager.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		manager.Admit("fixed")
+	}
+	if calls := host.aligns.Load(); calls != 1 {
+		t.Fatalf("aligned: AlignWeekly calls = %d, want 1", calls)
+	}
+	info := host.keys["fixed"]
+	info.PlanRevision = "r2"
+	host.keys["fixed"] = info
+	if err := manager.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	manager.Admit("fixed")
+	if calls := host.aligns.Load(); calls != 2 {
+		t.Fatalf("after a plan change: AlignWeekly calls = %d, want 2", calls)
+	}
+}
+
+// Usage the store numbered at or below a read's sequence is in that read, so
+// its live delta is not added again, whichever arrives first.
+func TestLiveUsageIsCountedOnceAcrossARefresh(t *testing.T) {
+	manager, host := configuredManager(t)
+	manager.Observe("a1", Observation{At: host.now, Has5h: true, Used5h: 10, Reset5h: host.now.Add(time.Hour)})
+	host.seq = 5
+	host.usage["fixed"] = 12
+	host.keys["fixed"] = KeyInfo{PlanID: "plan", HasWeekly: true, WeeklyUSD: 100, UsedWeekUSD: 30,
+		CycleStart: host.now.Add(-time.Hour), CycleEnd: host.now.Add(48 * time.Hour)}
+	if err := manager.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	// Request 5 was stored before the read but reported after it.
+	manager.ObserveCost("fixed", host.now, 30, 5)
+	if balance, _ := manager.Balance("fixed"); balance != 70 {
+		t.Fatalf("balance with an already counted request = %v, want 70", balance)
+	}
+	manager.ObserveCost("fixed", host.now, 10, 6)
+	if balance, _ := manager.Balance("fixed"); balance != 60 {
+		t.Fatalf("balance with a new request = %v, want 60", balance)
+	}
+	view, _ := manager.View()
+	for _, key := range view.Keys {
+		if key.Scope == "fixed" && key.UsedFiveHourUSD != 22 {
+			t.Fatalf("5-hour usage = %v, want 12 read + 10 live", key.UsedFiveHourUSD)
+		}
+	}
+}
+
+func TestLiveUsageStaysBoundedWhenRefreshesFail(t *testing.T) {
+	manager, host := configuredManager(t)
+	manager.ObserveCost("fixed", host.now.Add(-8*24*time.Hour), 1, 1)
+	for i := range maxDeltasPerKey + 10 {
+		manager.ObserveCost("remainder", host.now, 0.01, uint64(i+2))
+	}
+	host.dbErr = errors.New("disk I/O error")
+	if err := manager.Refresh(); err == nil {
+		t.Fatal("refresh succeeded")
+	}
+	manager.liveMu.RLock()
+	fixed, remainder := len(manager.deltas["fixed"]), len(manager.deltas["remainder"])
+	manager.liveMu.RUnlock()
+	if fixed != 0 || remainder != maxDeltasPerKey {
+		t.Fatalf("deltas after a failed refresh: fixed %d, remainder %d", fixed, remainder)
+	}
+	host.dbErr = nil
+	if err := manager.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(host.logs, func(line string) bool { return strings.Contains(line, "oldest were dropped") }) {
+		t.Fatalf("logs = %q", host.logs)
+	}
+}
+
+func TestReadErrorsKeepTheLastSuccessfulValues(t *testing.T) {
+	manager, host := configuredManager(t)
+	host.weekly = &WeeklyPeriod{Start: host.now.Add(-24 * time.Hour), ResetAt: host.now.Add(6 * 24 * time.Hour)}
+	manager.Observe("a1", Observation{At: host.now, Has5h: true, Used5h: 10, Reset5h: host.now.Add(time.Hour)})
+	host.usage["fixed"] = 12
+	if err := manager.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	host.usageErr = errors.New("database is locked")
+	host.weeklyErr = errors.New("database is locked")
+	if err := manager.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	snap := manager.snap.Load()
+	if key := snap.keys["fixed"]; key.usedFiveHour != 12 {
+		t.Fatalf("5-hour usage after a failed read = %v, want 12", key.usedFiveHour)
+	}
+	if account := snap.accounts["a1"]; !account.hasWeek || !account.weekly.ResetAt.Equal(host.weekly.ResetAt) {
+		t.Fatalf("weekly period after a failed read = %+v", account)
+	}
+	if manager.lastError.Load().(string) == "" {
+		t.Fatal("the read errors were not recorded")
 	}
 }

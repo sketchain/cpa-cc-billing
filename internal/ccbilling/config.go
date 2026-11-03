@@ -8,6 +8,7 @@ package ccbilling
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -58,6 +59,12 @@ type Params struct {
 	ColdStartBlocks int `json:"cold_start_blocks"`
 	// Default weekly totals, in USD, while an account is in cold start.
 	TierWeeklyUSD map[string]float64 `json:"tier_weekly_usd"`
+	// TierK is the default weekly/5-hour ratio of each tier, used while an
+	// account has neither a manual nor an estimated k.
+	TierK map[string]float64 `json:"tier_k"`
+	// RefuseUnloaded refuses remainder keys while the settings are loaded
+	// but no estimate snapshot exists yet.
+	RefuseUnloaded bool `json:"refuse_remainder_when_unloaded"`
 	// SafetyFactor discounts an account's estimated remaining capacity.
 	SafetyFactor float64 `json:"safety_factor"`
 }
@@ -111,6 +118,8 @@ func DefaultParams() Params {
 		KMinWeeklyPoints:     10,
 		ColdStartBlocks:      20,
 		TierWeeklyUSD:        map[string]float64{TierPro: 250, TierMax5x: 1250, TierMax20x: 2500},
+		TierK:                map[string]float64{TierPro: 8, TierMax5x: 8, TierMax20x: 8},
+		RefuseUnloaded:       true,
 		SafetyFactor:         0.9,
 	}
 }
@@ -134,6 +143,14 @@ func (p Params) TierWeekly(tier string) float64 {
 		return value
 	}
 	return p.TierWeeklyUSD[TierPro]
+}
+
+// TierKFor is the default k of a tier; an unknown tier uses Pro's.
+func (p Params) TierKFor(tier string) float64 {
+	if value, ok := p.TierK[tier]; ok {
+		return value
+	}
+	return p.TierK[TierPro]
 }
 
 func finite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }
@@ -175,6 +192,16 @@ func (p Params) validate() error {
 			return fmt.Errorf("Unknown tier %q", tier)
 		}
 	}
+	for _, tier := range []string{TierPro, TierMax5x, TierMax20x} {
+		if value, ok := p.TierK[tier]; !ok || !finite(value) || value < 1 || value > 100 {
+			return fmt.Errorf("tier_k.%s must be from 1 to 100", tier)
+		}
+	}
+	for tier := range p.TierK {
+		if tier != TierPro && tier != TierMax5x && tier != TierMax20x {
+			return fmt.Errorf("Unknown tier %q", tier)
+		}
+	}
 	return nil
 }
 
@@ -185,10 +212,8 @@ func (s Settings) Normalized() (Settings, error) {
 	}
 	out := Settings{Params: s.Params, Pools: make([]Pool, 0, len(s.Pools)),
 		Accounts: make(map[string]AccountSettings, len(s.Accounts)), Keys: make(map[string]KeySettings, len(s.Keys))}
-	out.Params.TierWeeklyUSD = make(map[string]float64, len(s.Params.TierWeeklyUSD))
-	for tier, value := range s.Params.TierWeeklyUSD {
-		out.Params.TierWeeklyUSD[tier] = value
-	}
+	out.Params.TierWeeklyUSD = maps.Clone(s.Params.TierWeeklyUSD)
+	out.Params.TierK = maps.Clone(s.Params.TierK)
 	ids := map[string]bool{}
 	for _, pool := range s.Pools {
 		pool.ID, pool.Name = strings.TrimSpace(pool.ID), strings.TrimSpace(pool.Name)

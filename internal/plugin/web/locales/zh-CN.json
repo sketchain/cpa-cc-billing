@@ -932,5 +932,10 @@
   "cc.k_origin_manual": "手动",
   "cc.k_origin_none": "无",
   "cc.five_hour_unknown_tip": "需要 k：k 估算出来或手动设置之前，5 小时总额未知",
-  "cc.remaining_tip": "按最近一次用量报告计算、已乘安全系数的剩余额度"
+  "cc.remaining_tip": "按最近一次用量报告计算、已乘安全系数的剩余额度",
+  "backend.cc_pool_value_has_no_claude_account": "CC 池 {v0} 里没有 Claude 账号。",
+  "backend.cc_blocked_weekly_reserve": "被 CC 池 {v0} 的周预留拦截：池的预估剩余周额度 ${v1} 没有超过为固定 key 预留的 ${v2}。",
+  "backend.cc_blocked_five_hour_reserve": "被 CC 池 {v0} 的 5 小时预留拦截：池的预估剩余 5 小时额度 ${v1} 没有超过为固定 key 预留的 ${v2}。",
+  "backend.cc_blocked_weekly_cap": "已达到自己在 CC 池 {v0} 的周上限：已用 ${v1} / ${v2}。",
+  "backend.cc_blocked_not_loaded": "CC 估算尚未加载，余量 key 暂被拦截，等能算出池的预留后再放行。"
 }

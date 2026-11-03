@@ -932,5 +932,10 @@
   "cc.k_origin_manual": "manual",
   "cc.k_origin_none": "none",
   "cc.five_hour_unknown_tip": "Needs k: the 5-hour total is unknown until k is estimated or set manually",
-  "cc.remaining_tip": "Remaining capacity after the safety factor, from the latest utilization report"
+  "cc.remaining_tip": "Remaining capacity after the safety factor, from the latest utilization report",
+  "backend.cc_pool_value_has_no_claude_account": "CC pool {v0} has no Claude account.",
+  "backend.cc_blocked_weekly_reserve": "API key blocked by the CC pool {v0} weekly reservation: the pool's estimated remaining weekly capacity ${v1} does not exceed the ${v2} reserved for fixed keys.",
+  "backend.cc_blocked_five_hour_reserve": "API key blocked by the CC pool {v0} 5-hour reservation: the pool's estimated remaining 5-hour capacity ${v1} does not exceed the ${v2} reserved for fixed keys.",
+  "backend.cc_blocked_weekly_cap": "API key reached its own weekly cap in CC pool {v0}: ${v1} of ${v2} used.",
+  "backend.cc_blocked_not_loaded": "API key blocked because the CC estimates have not loaded yet; remainder keys wait until the pool's reservations can be computed."
 }

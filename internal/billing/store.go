@@ -48,6 +48,9 @@ type Store struct {
 
 	// usageObserver is the cpa-cc-billing hook for recorded usage.
 	usageObserver UsageObserver
+	// usageSeq numbers recorded usage under mu, so readers can tell which
+	// usage a read already includes.
+	usageSeq uint64
 }
 
 func NewStore(open func(string) (Repository, error), downloadReferencePrices func(context.Context) ([]byte, error)) *Store {

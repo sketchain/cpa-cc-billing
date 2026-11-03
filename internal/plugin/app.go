@@ -29,6 +29,7 @@ type App struct {
 	pendingSequence       uint64
 	authModelsSupported   atomic.Bool
 	cc                    *ccbilling.Manager
+	ccBlocks              ccBlockLog
 }
 
 func (a *App) SetHostCaller(caller HostCaller) {
