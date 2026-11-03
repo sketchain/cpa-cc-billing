@@ -1,12 +1,18 @@
 name: Auto release
 
-# Tags each new version on main and starts its release. The version is the
-# first "## vX.Y.Z" heading of Changelog.md, which must match the plugin
-# Version in internal/plugin/types.go. A tag pushed with GITHUB_TOKEN does not
-# trigger release.yml's tag event, so this workflow dispatches it explicitly.
+# Tags each new version on main and starts its release, once the Check
+# workflow has passed for that push, so a failing commit is never tagged. The
+# version is the first "## vX.Y.Z" heading of Changelog.md, which must match
+# the plugin Version in internal/plugin/types.go. A tag pushed with
+# GITHUB_TOKEN does not trigger release.yml's tag event, so this workflow
+# dispatches it explicitly.
 
 on:
-  push:
+  workflow_run:
+    workflows:
+      - Check
+    types:
+      - completed
     branches:
       - main
 
@@ -20,6 +26,12 @@ concurrency:
 jobs:
   tag:
     name: Tag and dispatch release
+    # Only a successful Check of a push to main; pull requests from main also
+    # run Check on the main branch name.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -30,6 +42,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
         with:
+          # The commit Check passed, not whatever main points to now.
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
       - name: Read release version
@@ -52,6 +66,7 @@ jobs:
         id: tag
         env:
           TAG: ${{ steps.version.outputs.tag }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
             echo "Tag $TAG already exists; nothing to release."
@@ -60,7 +75,7 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "Release $TAG" "$GITHUB_SHA"
+          git tag -a "$TAG" -m "Release $TAG" "$HEAD_SHA"
           git push origin "refs/tags/$TAG"
           echo "created=true" >> "$GITHUB_OUTPUT"
 
@@ -69,4 +84,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
-        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f release_tag="$TAG"
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" -f release_tag="$TAG"
