@@ -1308,6 +1308,185 @@ assert_reference_price_billing() {
   log_step "参考价已验证：普通模型及带前缀、思考后缀的模型，流式和非流式均按参考价记账"
 }
 
+# cc_report writes one synthetic unified-limit report for a Claude account into
+# the plugin's database, as a response's rate-limit headers would. Claude OAuth
+# requests always go to api.anthropic.com, so the dummy upstream cannot produce
+# them; everything after the report — estimates, admission, balance and cycle
+# alignment — runs through the real host and plugin.
+cc_report() {
+  local database="$1"
+  local auth_index="$2"
+  local request_id="$3"
+  local used_5h="$4"
+  local used_7d="$5"
+  local reset_5h="$6"
+  local reset_7d="$7"
+  python3 -I - "$database" "$auth_index" "$request_id" "$used_5h" "$used_7d" "$reset_5h" "$reset_7d" <<'PY'
+import sqlite3
+import sys
+import time
+
+database, auth_index, request_id, used_5h, used_7d, reset_5h, reset_7d = sys.argv[1:]
+at = time.time_ns()
+connection = sqlite3.connect(database, timeout=30)
+with connection:
+    connection.execute(
+        "INSERT INTO quota_reports (request_event_id, auth_index, provider, at) VALUES (?, ?, 'claude', ?)",
+        (int(request_id), auth_index, at))
+    for seconds, used, reset in ((18000, used_5h, reset_5h), (604800, used_7d, reset_7d)):
+        connection.execute(
+            "INSERT INTO quota_report_windows (request_event_id, limit_key, seconds, auth_index, provider, at, used_percent, reset_at)"
+            " VALUES (?, 'unified', ?, ?, 'claude', ?, ?, ?)",
+            (int(request_id), seconds, auth_index, at, float(used), int(reset) * 1_000_000_000))
+connection.close()
+PY
+}
+
+# cc_request sends one OpenAI Chat request with the given downstream key and
+# prints the HTTP status; the body and headers land in the given files.
+cc_request() {
+  local port="$1"
+  local key="$2"
+  local output="$3"
+  local headers_file="$4"
+  curl -sS --max-time 60 \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $key" \
+    --data "$(request_body chat "gpt-5.6-sol" false "Reply with exactly OK.")" \
+    --dump-header "$headers_file" \
+    --output "$output" \
+    --write-out '%{http_code}' \
+    "http://127.0.0.1:$port/v1/chat/completions"
+}
+
+cc_balance() {
+  local port="$1"
+  local key="$2"
+  curl -fsS --max-time 30 -H "Authorization: Bearer $key" \
+    "http://127.0.0.1:$port/v0/resource/plugins/cpa-cc-billing/balance" | jq -er '.total_available'
+}
+
+assert_cc_split() {
+  local port="$1"
+  local runtime_dir="$2"
+  local database="$runtime_dir/state.db"
+  local fixed_key="e2e-cc-fixed-key"
+  local remainder_key="e2e-downstream-key"
+  local plan_name="e2e-CC-固定 key 周额度"
+  local auth_index fixed_scope remainder_scope plan status reset_5h reset_7d anchor fixed_used
+  local remainder_balance fixed_balance reason
+  local base="/v0/management/plugins/cpa-cc-billing"
+
+  # A second downstream key for the fixed side of the pool.
+  management_call PUT "$port" "/v0/management/api-keys" -H "Content-Type: application/json" \
+    --data "$(jq -nc --arg a "$remainder_key" --arg b "$fixed_key" '[$a, $b]')" >/dev/null
+  management_call POST "$port" "$base/keys/sync" -H "Content-Type: application/json" \
+    --data "$(jq -nc --arg a "$remainder_key" --arg b "$fixed_key" '{keys: [$a, $b], allow_empty: true}')" >/dev/null
+  management_call GET "$port" "$base/keys" >"$runtime_dir/cc-keys.json"
+  fixed_scope="$(jq -er --arg preview "${fixed_key:0:7}" 'first(.keys[] | select(.in_config and (.preview | startswith($preview))) | .scope)' "$runtime_dir/cc-keys.json")"
+  remainder_scope="$(jq -er --arg scope "$fixed_scope" 'first(.keys[] | select(.in_config and .scope != $scope) | .scope)' "$runtime_dir/cc-keys.json")"
+  management_call GET "$port" "/v0/management/claude-api-key" >"$runtime_dir/cc-claude-keys.json"
+  auth_index="$(jq -er '.["claude-api-key"][0]["auth-index"]' "$runtime_dir/cc-claude-keys.json")"
+
+  management_call POST "$port" "$base/plans" -H "Content-Type: application/json" \
+    --data "$(jq -nc --arg name "$plan_name" --arg scope "$fixed_scope" \
+      '{name: $name, currency: "USD", windows: [{name: "Week", period_seconds: 604800, amount: 100}], scopes: [$scope]}')" \
+    >"$runtime_dir/cc-plan.json"
+  plan="$(jq -er '.plan.id' "$runtime_dir/cc-plan.json")"
+
+  # A Pro account at 10% / 10%: cold start, T_week $250 and, with the tier's
+  # default k of 8, T_5h $31.25. R_week = 0.9 × 250 × 0.9 = $202.50 exceeds the
+  # fixed key's $100; R_5h = 0.9 × 31.25 × 0.9 = $25.31 exceeds its $12.50.
+  reset_5h=$(( $(date +%s) + 3 * 3600 ))
+  reset_7d=$(( $(date +%s) + 4 * 86400 ))
+  cc_report "$database" "$auth_index" 900000001 10 10 "$reset_5h" "$reset_7d"
+  management_call PUT "$port" "$base/cc/settings" -H "Content-Type: application/json" \
+    --data "$(jq -nc --arg auth "$auth_index" --arg fixed "$fixed_scope" --arg remainder "$remainder_scope" \
+      --slurpfile current <(management_call GET "$port" "$base/cc") '
+      $current[0].cc.settings + {
+        pools: [{id: "e2e", name: "e2e 池", auth_indexes: [$auth], anchor_auth_index: $auth}],
+        accounts: {($auth): {tier: "pro"}},
+        keys: {($fixed): {kind: "fixed", pool_id: "e2e"}, ($remainder): {kind: "remainder", pool_id: "e2e"}}
+      }')" >"$runtime_dir/cc-settings.json"
+
+  # The fixed key's first request aligns its plan's week on the account's reset.
+  status="$(cc_request "$port" "$fixed_key" "$runtime_dir/responses/cc-fixed.json" "$runtime_dir/cc-fixed-headers.txt")"
+  if [[ "$status" != 200 ]]; then
+    echo "CC 固定 key 请求返回 HTTP ${status}：$(cat "$runtime_dir/responses/cc-fixed.json")" >&2
+    return 1
+  fi
+  management_call GET "$port" "$base/plans" >"$runtime_dir/cc-plans.json"
+  anchor="$(jq -er --arg id "$plan" 'first(.plans[] | select(.id == $id)) | .windows[0].cycle_anchor_at' "$runtime_dir/cc-plans.json")"
+  if [[ "$(jq -nr --arg at "$anchor" '$at | sub("\\.[0-9]+"; "") | fromdateiso8601')" != "$reset_7d" ]]; then
+    echo "CC 固定 key 的周期没有对齐账号的 7d 重置：锚点 ${anchor}，预期 $(jq -nr --argjson t "$reset_7d" '$t | todate')" >&2
+    return 1
+  fi
+  log_step "CC 固定 key 周期已对齐账号 7d 重置（${anchor}）"
+
+  status="$(cc_request "$port" "$remainder_key" "$runtime_dir/responses/cc-remainder.json" "$runtime_dir/cc-remainder-headers.txt")"
+  if [[ "$status" != 200 ]]; then
+    echo "CC 余量 key 在额度充足时返回 HTTP ${status}：$(cat "$runtime_dir/responses/cc-remainder.json")" >&2
+    return 1
+  fi
+  management_call POST "$port" "$base/cc/refresh" >/dev/null
+  management_call GET "$port" "$base/keys" >"$runtime_dir/cc-keys-used.json"
+  fixed_used="$(jq -er --arg scope "$fixed_scope" 'first(.keys[] | select(.scope == $scope)) | .windows[0].dimensions[0].used' "$runtime_dir/cc-keys-used.json")"
+  fixed_balance="$(cc_balance "$port" "$fixed_key")"
+  remainder_balance="$(cc_balance "$port" "$remainder_key")"
+  if ! jq -en --argjson used "$fixed_used" --argjson fixed "$fixed_balance" --argjson remainder "$remainder_balance" '
+      $used > 0 and (($fixed - (100 - $used)) | fabs) < 0.000001 and
+      (($remainder - (202.5 - (100 - $used))) | fabs) < 0.000001' >/dev/null; then
+    echo "CC 余额不正确：固定 key ${fixed_balance}（已用 ${fixed_used}），余量 key ${remainder_balance}" >&2
+    return 1
+  fi
+  log_step "CC /balance：固定 key \$${fixed_balance}，余量 key \$${remainder_balance}"
+
+  # 60% of the 5-hour window: R_5h = 0.9 × 31.25 × 0.4 = $11.25, under the
+  # fixed key's 5-hour reservation; then 60% of the week: R_week = $90.
+  for reason in five_hour_reserve weekly_reserve; do
+    if [[ "$reason" == five_hour_reserve ]]; then
+      cc_report "$database" "$auth_index" 900000002 60 10 "$reset_5h" "$reset_7d"
+    else
+      cc_report "$database" "$auth_index" 900000003 60 60 "$reset_5h" "$reset_7d"
+    fi
+    management_call POST "$port" "$base/cc/refresh" >/dev/null
+    status="$(cc_request "$port" "$remainder_key" "$runtime_dir/responses/cc-$reason.json" "$runtime_dir/cc-$reason-headers.txt")"
+    if [[ "$status" != 429 ]] || ! jq -e --arg reason "$reason" '
+        .error.type == "rate_limit_error" and
+        (.error.message | contains(if $reason == "weekly_reserve" then "weekly reservation" else "5-hour reservation" end))
+      ' "$runtime_dir/responses/cc-$reason.json" >/dev/null ||
+      ! grep -qi '^retry-after: *[1-9]' "$runtime_dir/cc-$reason-headers.txt"; then
+      echo "CC ${reason} 拦截不正确：HTTP ${status}，$(cat "$runtime_dir/responses/cc-$reason.json")" >&2
+      return 1
+    fi
+    # Fixed keys are never held back by the pool.
+    status="$(cc_request "$port" "$fixed_key" "$runtime_dir/responses/cc-fixed-$reason.json" "$runtime_dir/cc-fixed-$reason-headers.txt")"
+    if [[ "$status" != 200 ]]; then
+      echo "CC ${reason} 拦截时固定 key 也被拦下：HTTP ${status}" >&2
+      return 1
+    fi
+  done
+  remainder_balance="$(cc_balance "$port" "$remainder_key")"
+  if [[ "$remainder_balance" != 1 ]]; then
+    echo "CC 余量 key 余额耗尽后应上报 1，实际 ${remainder_balance}" >&2
+    return 1
+  fi
+  management_call GET "$port" "$base/plugin-logs" >"$runtime_dir/cc-plugin-logs.json"
+  if ! jq -e '[.entries[] | select(.message | startswith("CC blocked:"))] as $blocks |
+      ($blocks | length) == 2 and any($blocks[]; .message | contains("reason=five_hour_reserve")) and
+      any($blocks[]; .message | contains("reason=weekly_reserve"))' "$runtime_dir/cc-plugin-logs.json" >/dev/null; then
+    echo "CC 拦截日志不正确：$(jq -c '[.entries[] | select(.message | startswith("CC blocked:"))]' "$runtime_dir/cc-plugin-logs.json")" >&2
+    return 1
+  fi
+  log_step "CC 拦截：5h 预留与周预留各返回 429 并各记一条日志；余量 key 余额上报 1"
+
+  management_call PUT "$port" "$base/cc/settings" -H "Content-Type: application/json" \
+    --data "$(management_call GET "$port" "$base/cc" | jq -c '.cc.settings + {pools: [], accounts: {}, keys: {}}')" >/dev/null
+  management_call DELETE "$port" "$base/plans?id=$plan" >/dev/null
+  management_call PUT "$port" "/v0/management/api-keys" -H "Content-Type: application/json" \
+    --data "$(jq -nc --arg a "$remainder_key" '[$a]')" >/dev/null
+}
+
 run_target() {
   local target="$1"
   local index="$2"
@@ -1683,11 +1862,13 @@ run_target() {
   log_step "插件启动事件已验证"
   assert_reference_price_billing "$port" "$runtime_dir"
   assert_unpriced_model_policy "$port" "$runtime_dir"
+  log_step "CC 分账：周期对齐、/balance、5h 预留与周预留拦截"
+  assert_cc_split "$port" "$runtime_dir"
 
   kill "$active_pid" >/dev/null 2>&1 || true
   wait "$active_pid" >/dev/null 2>&1 || true
   active_pid=""
-  log_ok "${host_label}：52 个上游请求（含 4 个参考价请求和 1 个未定价请求），1 次并发拦截，6 次模型拦截，4 次凭证路由，2 次凭证拦截，12 次额度拦截"
+  log_ok "${host_label}：52 个上游请求（含 4 个参考价请求和 1 个未定价请求），1 次并发拦截，6 次模型拦截，4 次凭证路由，2 次凭证拦截，12 次额度拦截，CC 分账 4 个放行与 2 次预留拦截"
 }
 
 log_stage "启动 dummy provider"
