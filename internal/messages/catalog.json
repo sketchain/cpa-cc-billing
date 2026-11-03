@@ -645,5 +645,20 @@
   "API key blocked because the CC estimates have not loaded yet; remainder keys wait until the pool's reservations can be computed.": {
     "key": "backend.cc_blocked_not_loaded",
     "formats": []
+  },
+  "Account %q is already in CC pool %q; an account can belong to only one pool": {
+    "key": "backend.cc_account_value_already_in_pool_value",
+    "formats": [
+      "%q",
+      "%q"
+    ]
+  },
+  "Fixed keys %s and %s share subscription plan %q but belong to different CC pools; give each pool its own plan": {
+    "key": "backend.cc_fixed_keys_share_plan_across_pools",
+    "formats": [
+      "%s",
+      "%s",
+      "%q"
+    ]
   }
 }

@@ -481,3 +481,55 @@ func TestCCRefusalsAreLoggedOncePerWindow(t *testing.T) {
 		t.Fatalf("block logs after a new window = %q", lines)
 	}
 }
+
+func TestCCSettingsRejectSharedAccountsAndPlans(t *testing.T) {
+	app, _ := newCCTestApp(t)
+	var view struct {
+		CC ccbilling.View `json:"cc"`
+	}
+	callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, &view)
+	if pool := view.CC.Settings.Pools[0]; pool.Anchor != ccAuth {
+		t.Fatalf("anchor of a pool saved without one = %q", pool.Anchor)
+	}
+	var failure struct {
+		Error struct {
+			Key string `json:"message_key"`
+		} `json:"error"`
+	}
+
+	duplicate := view.CC.Settings
+	duplicate.Pools = append(duplicate.Pools, ccbilling.Pool{ID: "spare", AuthIndexes: []string{ccAuth}})
+	callOK(t, app, http.MethodPut, routeCCConfig, nil, duplicate, http.StatusBadRequest, &failure)
+	if failure.Error.Key != "backend.cc_account_value_already_in_pool_value" {
+		t.Fatalf("duplicate account error key = %q", failure.Error.Key)
+	}
+
+	const otherFixed = "sk-cc-fixed-0002"
+	if _, err := app.store.SyncKeys([]string{ccFixedKey, ccRemainderKey, otherFixed}, false); err != nil {
+		t.Fatal(err)
+	}
+	callOK(t, app, http.MethodPost, routeKeysBind, nil, map[string]string{"scope": billing.CallerScope(otherFixed), "plan_id": "fixed-a"}, http.StatusOK, nil)
+	shared := view.CC.Settings
+	shared.Pools = append(shared.Pools, ccbilling.Pool{ID: "second", AuthIndexes: []string{"auth-claude-2"}})
+	shared.Keys[billing.CallerScope(otherFixed)] = ccbilling.KeySettings{Kind: ccbilling.KeyFixed, PoolID: "second"}
+	failure.Error.Key = ""
+	callOK(t, app, http.MethodPut, routeCCConfig, nil, shared, http.StatusBadRequest, &failure)
+	if failure.Error.Key != "backend.cc_fixed_keys_share_plan_across_pools" {
+		t.Fatalf("shared plan error key = %q", failure.Error.Key)
+	}
+	// Key rows tell the API key page which keys are CC fixed keys.
+	for _, row := range readKeyRows(t, app) {
+		if row.Scope == billing.CallerScope(ccFixedKey) && row.CCKind != ccbilling.KeyFixed {
+			t.Fatalf("fixed key row cc_kind = %q", row.CCKind)
+		}
+	}
+}
+
+func readKeyRows(t *testing.T, app *App) []keyRow {
+	t.Helper()
+	var response struct {
+		Keys []keyRow `json:"keys"`
+	}
+	callOK(t, app, http.MethodGet, routeKeys, nil, nil, http.StatusOK, &response)
+	return response.Keys
+}

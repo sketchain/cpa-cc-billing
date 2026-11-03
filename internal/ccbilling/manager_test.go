@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"cpa-cc-billing/internal/messages"
+
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -504,5 +506,52 @@ func TestReadErrorsKeepTheLastSuccessfulValues(t *testing.T) {
 	}
 	if manager.lastError.Load().(string) == "" {
 		t.Fatal("the read errors were not recorded")
+	}
+}
+
+func TestAnAccountBelongsToOnePool(t *testing.T) {
+	settings := DefaultSettings()
+	settings.Pools = []Pool{{ID: "a", Name: "A", AuthIndexes: []string{"x", "y"}}, {ID: "b", Name: "B", AuthIndexes: []string{"y"}}}
+	_, err := settings.Normalized()
+	if err == nil || !strings.Contains(err.Error(), `"y" is already in CC pool "A"`) || messages.FromError(err).Key == "" {
+		t.Fatalf("duplicate account error = %v (%+v)", err, messages.FromError(err))
+	}
+}
+
+func TestPoolAnchors(t *testing.T) {
+	settings := DefaultSettings()
+	settings.Pools = []Pool{
+		{ID: "legacy", AuthIndexes: []string{"a", "b"}},
+		{ID: "chosen", AuthIndexes: []string{"c", "d", "e"}, Anchor: "d"},
+		{ID: "stale", AuthIndexes: []string{"f"}, Anchor: "gone"},
+	}
+	normalized, err := settings.Normalized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []struct {
+		anchor  string
+		indexes []string
+	}{{"a", []string{"a", "b"}}, {"d", []string{"d", "c", "e"}}, {"f", []string{"f"}}} {
+		pool := normalized.Pools[i]
+		if pool.Anchor != want.anchor || !slices.Equal(pool.AuthIndexes, want.indexes) {
+			t.Fatalf("pool %s = %+v, want anchor %s and %v", pool.ID, pool, want.anchor, want.indexes)
+		}
+	}
+}
+
+func TestFixedKeysOfOnePlanStayInOnePool(t *testing.T) {
+	manager, host := configuredManager(t)
+	host.keys["fixed2"] = KeyInfo{Preview: "sk-f2", PlanID: "plan", HasWeekly: true, WeeklyUSD: 50}
+	settings, _ := manager.Settings()
+	settings.Pools = append(settings.Pools, Pool{ID: "q", AuthIndexes: []string{"a2"}})
+	settings.Keys["fixed2"] = KeySettings{Kind: KeyFixed, PoolID: "p"}
+	if _, err := manager.SetSettings(settings); err != nil {
+		t.Fatalf("same plan in one pool: %v", err)
+	}
+	settings.Keys["fixed2"] = KeySettings{Kind: KeyFixed, PoolID: "q"}
+	_, err := manager.SetSettings(settings)
+	if err == nil || !strings.Contains(err.Error(), `share subscription plan "plan"`) || messages.FromError(err).Key == "" {
+		t.Fatalf("shared plan across pools = %v", err)
 	}
 }

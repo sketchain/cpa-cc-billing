@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"cpa-cc-billing/internal/messages"
 )
 
 // Key kinds.
@@ -70,11 +72,15 @@ type Params struct {
 }
 
 // Pool groups the Claude accounts that fixed and remainder keys share. The
-// first credential anchors the cycles of the pool's keys.
+// anchor account's resets set the cycles and 5-hour window of the pool's
+// keys; normalized settings list it first.
 type Pool struct {
 	ID          string   `json:"id"`
 	Name        string   `json:"name"`
 	AuthIndexes []string `json:"auth_indexes"`
+	// Anchor is the anchor account. Settings saved before it existed, or
+	// naming an account outside the pool, use the first account.
+	Anchor string `json:"anchor_auth_index"`
 }
 
 // AccountSettings are the operator's per-account choices.
@@ -215,6 +221,7 @@ func (s Settings) Normalized() (Settings, error) {
 	out.Params.TierWeeklyUSD = maps.Clone(s.Params.TierWeeklyUSD)
 	out.Params.TierK = maps.Clone(s.Params.TierK)
 	ids := map[string]bool{}
+	owners := map[string]string{}
 	for _, pool := range s.Pools {
 		pool.ID, pool.Name = strings.TrimSpace(pool.ID), strings.TrimSpace(pool.Name)
 		if pool.ID == "" || len(pool.ID) > 64 || ids[pool.ID] {
@@ -225,13 +232,31 @@ func (s Settings) Normalized() (Settings, error) {
 		}
 		ids[pool.ID] = true
 		var indexes []string
+		label := pool.Name
+		if label == "" {
+			label = pool.ID
+		}
 		for _, index := range pool.AuthIndexes {
 			if index = strings.TrimSpace(index); index != "" && !slices.Contains(indexes, index) {
+				// An account's capacity can only be shared out once.
+				if owner, taken := owners[index]; taken {
+					return Settings{}, messages.Errorf("Account %q is already in CC pool %q; an account can belong to only one pool", index, owner)
+				}
+				owners[index] = label
 				indexes = append(indexes, index)
 			}
 		}
 		if indexes == nil {
 			indexes = []string{}
+		}
+		pool.Anchor = strings.TrimSpace(pool.Anchor)
+		if anchor := slices.Index(indexes, pool.Anchor); anchor > 0 {
+			indexes = append(append([]string{pool.Anchor}, indexes[:anchor]...), indexes[anchor+1:]...)
+		} else if anchor < 0 {
+			pool.Anchor = ""
+			if len(indexes) > 0 {
+				pool.Anchor = indexes[0]
+			}
 		}
 		pool.AuthIndexes = indexes
 		out.Pools = append(out.Pools, pool)

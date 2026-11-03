@@ -548,3 +548,11 @@ func (a *App) ccReportBlock(scope string, decision ccbilling.Decision) {
 	}
 	a.store.AddPluginLog(billing.PluginLogInfo, "CC blocked: %s reason=%s: %s", name, decision.Reason, decision.Message)
 }
+
+// ccKeyKind is a key's CC split type for the API key page.
+func (a *App) ccKeyKind(scope string) string {
+	if a.cc == nil {
+		return ""
+	}
+	return a.cc.KeyKind(scope)
+}

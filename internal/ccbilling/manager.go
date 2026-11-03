@@ -188,6 +188,9 @@ func (m *Manager) SetSettings(next Settings) (Settings, error) {
 	if err != nil {
 		return Settings{}, err
 	}
+	if err := m.checkSharedPlans(normalized); err != nil {
+		return Settings{}, err
+	}
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 	if err := m.withDB(func(db *sql.DB) error { return saveSettings(db, normalized) }); err != nil {
@@ -1012,4 +1015,47 @@ func (m *Manager) admitUnloaded(scope string) Decision {
 	}
 	return refusal(RefusedNotLoaded, m.host.Now().Add(time.Minute),
 		"API key blocked because the CC estimates have not loaded yet; remainder keys wait until the pool's reservations can be computed.")
+}
+
+// checkSharedPlans refuses fixed keys that share a subscription plan across
+// pools: aligning the plan to two anchor accounts would move its cycles back
+// and forth.
+func (m *Manager) checkSharedPlans(settings Settings) error {
+	type owner struct{ scope, pool string }
+	plans := map[string]owner{}
+	for _, scope := range sortedKeys(settings.Keys) {
+		key := settings.Keys[scope]
+		if key.Kind != KeyFixed {
+			continue
+		}
+		info, known := m.host.KeyInfo(scope)
+		if !known || info.PlanID == "" {
+			continue
+		}
+		previous, seen := plans[info.PlanID]
+		if !seen {
+			plans[info.PlanID] = owner{scope, key.PoolID}
+			continue
+		}
+		if previous.pool != key.PoolID {
+			return messages.Errorf("Fixed keys %s and %s share subscription plan %q but belong to different CC pools; give each pool its own plan",
+				keyLabel(previous.scope, m.host), keyLabel(scope, m.host), info.PlanID)
+		}
+	}
+	return nil
+}
+
+func keyLabel(scope string, host Host) string {
+	if info, ok := host.KeyInfo(scope); ok && info.Preview != "" {
+		return info.Preview
+	}
+	return scope
+}
+
+// KeyKind is the key's type in the loaded settings, or "" when unassigned.
+func (m *Manager) KeyKind(scope string) string {
+	if settings := m.loaded.Load(); settings != nil {
+		return settings.Keys[scope].Kind
+	}
+	return ""
 }
