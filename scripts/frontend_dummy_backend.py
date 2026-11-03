@@ -1794,6 +1794,10 @@ CC_SETTINGS = {
 }
 
 
+PANEL_TABS = ["keys", "analysis", "request-events", "errors", "auth-files", "ai-providers", "cc"]
+PANEL_SETTINGS = {"hidden_tabs": ["ai-providers"], "account_self_service": True}
+
+
 def cc_payload():
     blocks = [{"start": iso(NOW - timedelta(hours=6 * index + 2)), "end": iso(NOW - timedelta(hours=6 * index)), "segments": 40 - index,
                "excluded": index % 3, "gain": 40 - index, "cost_usd": 18 - index * 0.2, "clean_gain": 40 - index - index % 3,
@@ -1894,6 +1898,8 @@ def payload_for(path, query):
                           for item in AUTH_FILES]}
     if path == f"{API_BASE}/auth-files":
         return {"files": auth_file_views(AUTH_FILES, query)}
+    if path == f"{API_BASE}/panel-settings":
+        return {"settings": PANEL_SETTINGS, "tabs": PANEL_TABS}
     if path == f"{API_BASE}/auth-files/quota":
         return auth_file_quota(query)
     if path == f"{API_BASE}/auth-files/history":
@@ -1995,6 +2001,8 @@ class Handler(BaseHTTPRequestHandler):
                 return (messages if name == "i18n.js" else "") + (UI_DIR / name).read_text()
 
             body = UI_INCLUDE.sub(include, (UI_DIR / "ui.html").read_text())
+            if not PANEL_SETTINGS["account_self_service"]:
+                body = body.replace('data-account-access="on"', 'data-account-access="off"', 1)
             self.send_html(body)
             return
         authorization = self.headers.get("Authorization", "")
@@ -2027,6 +2035,9 @@ class Handler(BaseHTTPRequestHandler):
             f"{RESOURCE_BASE}/usage/models",
             f"{RESOURCE_BASE}/ai-providers",
         }
+        if parsed.path in resource_paths and not PANEL_SETTINGS["account_self_service"]:
+            self.send_json(404, {"error": {"message": "Resource route not found"}})
+            return
         if parsed.path in resource_paths:
             if not authorization.startswith("Bearer ") or authorization[7:] not in api_keys:
                 self.send_json(401, {"error": {"message": "API Key 无效"}})
@@ -2143,7 +2154,16 @@ class Handler(BaseHTTPRequestHandler):
             self.mutation_view = json.loads(request_body or b"{}")
             request_body = json.dumps(self.mutation_view.get("data") or {}).encode()
         route = self.command, parsed.path
-        if route == ("PUT", f"{API_BASE}/cc/settings"):
+        if route == ("PUT", f"{API_BASE}/panel-settings"):
+            body = json.loads(request_body or b"{}")
+            hidden = body.get("hidden_tabs") or []
+            if any(tab not in PANEL_TABS for tab in hidden):
+                self.send_json(400, {"error": {"message": "Unknown page; the settings page cannot be hidden"}})
+                return
+            PANEL_SETTINGS.update(hidden_tabs=[tab for tab in PANEL_TABS if tab in hidden],
+                                  account_self_service=bool(body.get("account_self_service")))
+            self.send_json(200, {"settings": PANEL_SETTINGS, "tabs": PANEL_TABS})
+        elif route == ("PUT", f"{API_BASE}/cc/settings"):
             CC_SETTINGS.clear()
             CC_SETTINGS.update(json.loads(request_body or b"{}"))
             self.send_json(200, {"settings": CC_SETTINGS})

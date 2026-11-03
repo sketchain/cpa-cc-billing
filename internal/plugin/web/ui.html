@@ -22,7 +22,7 @@
       /*theme.js*/
     </script>
   </head>
-  <body>
+  <body data-account-access="on">
     <div class="wrap">
       <section id="gate" class="card gate hidden" aria-labelledby="gate-title">
         <div class="gate-top">
@@ -139,6 +139,13 @@
         </section>
 
         <section id="tab-analysis" class="hidden"><div id="analysis-body"></div></section>
+
+        <section id="tab-display" class="hidden">
+          <div class="card">
+            <div class="row spread settings-section-header"><h2 data-i18n="panel.title">Page display</h2></div>
+            <div id="panel-body"></div>
+          </div>
+        </section>
 
         <section id="tab-plans" class="hidden">
           <div class="card">
@@ -737,6 +744,7 @@
       /*ai-providers.js*/
       /*account.js*/
       /*cc.js*/
+      /*panel.js*/
       /*app.js*/
     </script>
   </body>

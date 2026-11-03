@@ -240,6 +240,11 @@ http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-cc-billing/ui
 http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-cc-billing/ui#account
 ```
 
+设置页的「页面显示」卡片保存在数据库里，升级后自动带上默认值：
+
+- 勾选的标签页不在导航中显示（「设置」不能隐藏），默认隐藏「AI 供应商」。只影响显示，对应的管理接口照常工作。
+- 「允许 API Key 用户自助查询」默认开启。关闭后登录页不再显示 API Key 入口，自助页用到的资源路由一律返回 404；`/balance` 余额接口不受影响。
+
 ## 计费与订阅规则
 
 - 未绑定订阅计划的 API Key 只统计用量，不限制额度。

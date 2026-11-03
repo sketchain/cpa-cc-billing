@@ -139,6 +139,8 @@ type Manager struct {
 	alignMu    sync.Mutex
 	alignments map[string]alignmentEntry
 
+	panel atomic.Pointer[PanelSettings]
+
 	lastError      atomic.Value
 	loggedUnloaded atomic.Bool
 
@@ -292,7 +294,14 @@ func (m *Manager) withDB(fn func(*sql.DB) error) error {
 			if err != nil {
 				return err
 			}
+			panel, err := loadPanelSettings(db)
+			if err != nil {
+				// Page preferences must not stop the estimates.
+				m.host.Logf("%v; using the default page settings", err)
+				panel = DefaultPanelSettings()
+			}
 			m.db, m.settings = db, settings
+			m.panel.Store(&panel)
 			m.accounts = map[string]*accountCache{}
 			m.lastRefresh, m.lastPrune = time.Time{}, time.Time{}
 			m.snap.Store(nil)

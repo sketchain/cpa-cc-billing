@@ -207,6 +207,11 @@ API key holders can use their own key to view their subscription and usage:
 http(s)://<CLIProxyAPI address>/v0/resource/plugins/cpa-cc-billing/ui#account
 ```
 
+The **Page display** card on the Settings page is stored in the database and starts from its defaults after an upgrade:
+
+- Checked tabs are hidden from the navigation (Settings cannot be hidden); AI Providers is hidden by default. Hiding a tab only changes the page: its management API keeps working.
+- **Allow API key users to view their own usage** is on by default. When off, the sign-in page no longer offers API key access and every resource route the self-service page uses returns 404; the `/balance` endpoint is unaffected.
+
 ## Billing and quotas
 
 - Keys without a subscription plan still have their usage recorded, but have no subscription quota limit.

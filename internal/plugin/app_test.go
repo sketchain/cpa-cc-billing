@@ -132,6 +132,7 @@ func TestManagementRegistrationExposesOnlyCurrentEndpoints(t *testing.T) {
 		"POST /auth-files/quota/reset", "GET /auth-files/history", "GET /usage/models",
 		"GET /ai-providers", "POST /ai-providers/balance", "POST /ai-providers/note",
 		"GET /cc", "PUT /cc/settings", "POST /cc/refresh", "POST /cc/rebuild", "POST /prices/import",
+		"GET /panel-settings", "PUT /panel-settings",
 	} {
 		wantRoutes[value] = false
 	}

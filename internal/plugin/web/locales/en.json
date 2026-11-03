@@ -919,5 +919,12 @@
   "cc.k_basis_recent": "Only the recent group is valid",
   "cc.k_basis_old": "Only the older group is valid",
   "cc.k_basis_total": "Neither group alone is enough; the combined ratio is used",
-  "cc.k_basis_none": "Not enough 7-day gain to estimate k"
+  "cc.k_basis_none": "Not enough 7-day gain to estimate k",
+  "panel.title": "Page display",
+  "panel.hidden_tabs": "Hidden pages",
+  "panel.hidden_tabs_hint": "Checked pages are hidden from the navigation. Their data and APIs keep working; Settings is always shown.",
+  "panel.account_self_service": "Allow API key users to view their own usage",
+  "panel.account_self_service_hint": "When off, the sign-in page offers only the management key and every API key resource route except /balance returns 404.",
+  "panel.saved": "Page display settings saved",
+  "panel.sign_in_title": "Sign in to the management console"
 }

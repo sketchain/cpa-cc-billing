@@ -44,12 +44,14 @@ function writePageRoute(role, tab) {
 }
 
 const initialRoute = pageRoute();
+// The server marks the page when API key self-service is turned off.
+const ACCOUNT_ACCESS = document.body.dataset.accountAccess !== "off";
 
 let authKey = "";
 let currentRole = "";
 let sessionGeneration = 0;
 const activeRequests = new Set();
-let loginMode = initialRoute.role;
+let loginMode = ACCOUNT_ACCESS ? initialRoute.role : "admin";
 let loginModeRequest = 0;
 function emptyAuthQuotaState() {
   return { authQuotas: new Map(), authQuotaLoading: new Set(), authQuotaErrors: new Map(), authFileRevisions: new Map() };

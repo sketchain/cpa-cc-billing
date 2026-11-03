@@ -26,3 +26,6 @@
 .cc-pool-name { width: auto; }
 .cc-k { white-space: nowrap; font-size: 12px; }
 .cc-k-final { font-weight: 600; font-size: 13px; }
+.panel-setting + .panel-setting { margin-top: 18px; }
+.panel-setting > p.muted { margin: 4px 0 10px; }
+.panel-setting-label { font-weight: 600; }

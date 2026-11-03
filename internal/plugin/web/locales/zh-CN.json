@@ -919,5 +919,12 @@
   "cc.k_basis_recent": "只有近期组有效",
   "cc.k_basis_old": "只有更早组有效",
   "cc.k_basis_total": "两组单独都不够，使用合计比值",
-  "cc.k_basis_none": "7d 涨幅不足，暂无 k"
+  "cc.k_basis_none": "7d 涨幅不足，暂无 k",
+  "panel.title": "页面显示",
+  "panel.hidden_tabs": "隐藏页面",
+  "panel.hidden_tabs_hint": "勾选的页面不在导航中显示，数据和接口照常工作；「设置」始终显示。",
+  "panel.account_self_service": "允许 API Key 用户自助查询",
+  "panel.account_self_service_hint": "关闭后登录页只保留管理密钥入口，除 /balance 外的 API Key 资源接口一律返回 404。",
+  "panel.saved": "页面显示设置已保存",
+  "panel.sign_in_title": "登录管理面板"
 }
