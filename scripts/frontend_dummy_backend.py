@@ -1798,6 +1798,24 @@ PANEL_TABS = ["keys", "analysis", "request-events", "errors", "auth-files", "ai-
 PANEL_SETTINGS = {"hidden_tabs": ["ai-providers"], "account_self_service": True}
 
 
+def cc_auth_summaries():
+    accounts = {account["auth_index"]: account for account in cc_payload()["cc"]["accounts"]}
+    summaries = {}
+    for pool in CC_SETTINGS["pools"]:
+        for index in pool["auth_indexes"]:
+            account = accounts.get(index)
+            if not account:
+                continue
+            summary = summaries.setdefault(index, {
+                "pools": [], "tier": account["tier"], "five_hour_total_usd": account["five_hour_total_usd"],
+                "weekly_total_usd": account["weekly_total_usd"], "totals_from": account["totals_from"], "k": account["k"],
+                "k_source": account["k_source"], "remaining_week_usd": account["remaining_week_usd"],
+                "remaining_five_hour_usd": account["remaining_five_hour_usd"], "cold_start": account["cold_start"],
+                "clean_blocks": account["clean_blocks"], "cold_start_blocks": CC_SETTINGS["params"]["cold_start_blocks"]})
+            summary["pools"].append(pool["name"] or pool["id"])
+    return summaries
+
+
 def cc_payload():
     blocks = [{"start": iso(NOW - timedelta(hours=6 * index + 2)), "end": iso(NOW - timedelta(hours=6 * index)), "segments": 40 - index,
                "excluded": index % 3, "gain": 40 - index, "cost_usd": 18 - index * 0.2, "clean_gain": 40 - index - index % 3,
@@ -1897,7 +1915,12 @@ def payload_for(path, query):
         return {"files": [{field: item[field] for field in ("auth_index", "weight", "id_token") if field in item}
                           for item in AUTH_FILES]}
     if path == f"{API_BASE}/auth-files":
-        return {"files": auth_file_views(AUTH_FILES, query)}
+        summaries = cc_auth_summaries()
+        files = auth_file_views(AUTH_FILES, query)
+        for view in files:
+            if view["category"] == "claude" and view["auth_index"] in summaries:
+                view["cc"] = summaries[view["auth_index"]]
+        return {"files": files}
     if path == f"{API_BASE}/panel-settings":
         return {"settings": PANEL_SETTINGS, "tabs": PANEL_TABS}
     if path == f"{API_BASE}/auth-files/quota":

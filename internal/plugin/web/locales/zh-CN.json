@@ -926,5 +926,11 @@
   "panel.account_self_service": "允许 API Key 用户自助查询",
   "panel.account_self_service_hint": "关闭后登录页只保留管理密钥入口，除 /balance 外的 API Key 资源接口一律返回 404。",
   "panel.saved": "页面显示设置已保存",
-  "panel.sign_in_title": "登录管理面板"
+  "panel.sign_in_title": "登录管理面板",
+  "cc.auth_estimate_title": "CC 分账估算",
+  "cc.k_origin_auto": "自动",
+  "cc.k_origin_manual": "手动",
+  "cc.k_origin_none": "无",
+  "cc.five_hour_unknown_tip": "需要 k：k 估算出来或手动设置之前，5 小时总额未知",
+  "cc.remaining_tip": "按最近一次用量报告计算、已乘安全系数的剩余额度"
 }

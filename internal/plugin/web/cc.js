@@ -548,6 +548,52 @@ function ccBlocksSection(data) {
   );
 }
 
+// The CC split's estimate of a pooled Claude account on the auth files page and drawer.
+function renderCCAuthSummary(cc, heading = true) {
+  const item = (label, value, tooltip) =>
+    el(
+      "span",
+      { class: "cc-auth-item", "data-tip": tooltip || null },
+      el("span", { class: "cc-auth-label", text: label }),
+      el("span", { class: "cc-auth-value", text: value })
+    );
+  const status = cc.cold_start
+    ? el("span", {
+        class: "tag warn",
+        text: m("cc.cold_start"),
+        "data-tip": m("cc.cold_start_tip", { v0: cc.clean_blocks, v1: cc.cold_start_blocks })
+      })
+    : el("span", { class: "tag ok", text: m("cc.estimated") });
+  const k = cc.k ? ccNumber(cc.k) + DISPLAY_SEPARATOR + m("cc.k_origin_" + cc.k_source) : "—";
+  return el(
+    "div",
+    { class: "cc-auth-summary" },
+    el(
+      "div",
+      { class: "cc-auth-head" },
+      heading && el("span", { class: "cc-auth-title", text: m("cc.auth_estimate_title") }),
+      status,
+      el("span", { class: "muted", text: cc.pools.join(", ") })
+    ),
+    el(
+      "div",
+      { class: "cc-auth-grid" },
+      item(
+        m("cc.total_5h"),
+        cc.five_hour_total_usd > 0 ? ccUSD(cc.five_hour_total_usd) : m("cc.unknown"),
+        cc.five_hour_total_usd > 0 ? "" : m("cc.five_hour_unknown_tip")
+      ),
+      item(m("cc.total_week"), ccUSD(cc.weekly_total_usd), m("cc.totals_from_" + cc.totals_from)),
+      item(m("cc.k"), k, cc.k ? "" : m("cc.k_basis_none")),
+      item(
+        m("cc.remaining_week_5h"),
+        ccUSD(cc.remaining_week_usd) + DISPLAY_SLASH + ccUSD(cc.remaining_five_hour_usd),
+        m("cc.remaining_tip")
+      )
+    )
+  );
+}
+
 async function ccRun(action) {
   if (ccState.busy) return;
   ccState.busy = true;

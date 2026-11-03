@@ -91,6 +91,10 @@ The plugin switches the 7-day window of a fixed key's plan to a shared cycle anc
 
 Everything is set on the **CC split** page and stored in the database: segment retention (365 days, independent of request events), block gap (5 minutes), window width (8%), reference (global), suspicious threshold (20%), exclusion vote (50%), weight exponent p (2), recent period and share (14 days, 90%), weekly gain for k (10 points), cold start blocks (20), tier defaults ($250 / $1250 / $2500), safety factor (90%), each account's tier and manual k, and each key's type, pool, 5-hour share override or weekly cap.
 
+### Auth files page
+
+For Claude accounts in a CC pool, the auth files page (with **Quota estimate** on) and its detail drawer show the CC split's result instead of the estimate scaled by usage × 100 / used percent: the 5-hour and weekly totals, k with its source (auto or manual), R week / R 5h and the cold start state. They come from the latest estimate snapshot; opening the page does not refresh the estimates. Other accounts are unchanged.
+
 ### Balance endpoint for new-api
 
 ```text

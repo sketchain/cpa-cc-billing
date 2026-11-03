@@ -29,3 +29,18 @@
 .panel-setting + .panel-setting { margin-top: 18px; }
 .panel-setting > p.muted { margin: 4px 0 10px; }
 .panel-setting-label { font-weight: 600; }
+.cc-auth-summary {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-color);
+  font-size: 12px;
+}
+.cc-auth-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.cc-auth-title { font-weight: 600; }
+.cc-auth-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 4px 12px; }
+.cc-auth-item { display: flex; flex-direction: column; min-width: 0; }
+.cc-auth-label { color: var(--text-secondary); }
+.cc-auth-value { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.drawer-section .cc-auth-summary { margin-top: 0; padding-top: 0; border-top: 0; font-size: 13px; }

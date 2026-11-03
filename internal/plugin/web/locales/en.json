@@ -926,5 +926,11 @@
   "panel.account_self_service": "Allow API key users to view their own usage",
   "panel.account_self_service_hint": "When off, the sign-in page offers only the management key and every API key resource route except /balance returns 404.",
   "panel.saved": "Page display settings saved",
-  "panel.sign_in_title": "Sign in to the management console"
+  "panel.sign_in_title": "Sign in to the management console",
+  "cc.auth_estimate_title": "CC split estimate",
+  "cc.k_origin_auto": "auto",
+  "cc.k_origin_manual": "manual",
+  "cc.k_origin_none": "none",
+  "cc.five_hour_unknown_tip": "Needs k: the 5-hour total is unknown until k is estimated or set manually",
+  "cc.remaining_tip": "Remaining capacity after the safety factor, from the latest utilization report"
 }

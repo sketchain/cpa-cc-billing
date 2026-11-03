@@ -431,14 +431,18 @@ function renderAuthFileQuota(file, account) {
     summary.push(el("span", { text: m("ui.available_resets_value", { v0: int(result.rate_limit_reset_credits_available_count) }) }));
   }
   const rows = result.quota;
+  // A pooled Claude account shows the CC split's estimate instead of scaling usage by the used share.
+  const estimate = ui.estimate?.checked === true;
+  const cc = estimate && !account && file.cc;
   return el(
     "div",
     { class: "auth-file-quota" },
     summary.length ? el("div", { class: "auth-quota-summary" }, summary) : null,
     error && el("div", { class: "credential-error", text: error }),
     rows.length
-      ? renderAuthQuotaRows(rows, account, ui.estimate?.checked === true)
-      : el("div", { class: "muted small", text: m("ui.the_upstream_returned_no_displayable_quota") })
+      ? renderAuthQuotaRows(rows, account, estimate && !cc)
+      : el("div", { class: "muted small", text: m("ui.the_upstream_returned_no_displayable_quota") }),
+    cc && renderCCAuthSummary(cc)
   );
 }
 

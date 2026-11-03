@@ -485,3 +485,17 @@ func (a *App) ccUIHTML() []byte {
 	}
 	return bytes.Replace(uiHTML, uiAccountAccessOn, uiAccountAccessOff, 1)
 }
+
+// ccAttachAuthFiles adds the CC estimate of pooled Claude accounts to the auth
+// files page. It reads the latest snapshot only.
+func (a *App) ccAttachAuthFiles(views []authFileView) {
+	if a.cc == nil {
+		return
+	}
+	summaries := a.cc.AccountSummaries()
+	for i := range views {
+		if summary, ok := summaries[views[i].AuthIndex]; ok && views[i].Category == "claude" {
+			views[i].CC = &summary
+		}
+	}
+}

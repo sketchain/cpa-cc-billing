@@ -1,12 +1,14 @@
 package plugin
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -401,5 +403,37 @@ func TestCCRestartAppliesReservationsBeforeTheFirstUsage(t *testing.T) {
 	response := ccAdmit(t, restarted, ccRemainderKey)
 	if !response.Terminate || !strings.Contains(refusalMessage(t, response), "weekly reservation") {
 		t.Fatalf("remainder key after restart = %+v", response)
+	}
+}
+
+func TestAuthFilesCarryCCEstimates(t *testing.T) {
+	app, clock := newCCTestApp(t)
+	ccUsage(t, app, ccRemainderKey, 0.5, 0.10, 0.20, clock.now.Add(3*time.Hour), clock.now.Add(4*24*time.Hour))
+	app.SetHostCaller(func(method string, _ any) (json.RawMessage, error) {
+		if method != hostAuthList {
+			return json.RawMessage(`{}`), nil
+		}
+		return json.RawMessage(`{"files":[
+			{"id":"claude-1.json","auth_index":"` + ccAuth + `","name":"claude-1.json","type":"claude","provider":"claude"},
+			{"id":"claude-2.json","auth_index":"auth-claude-2","name":"claude-2.json","type":"claude","provider":"claude"}
+		]}`), nil
+	})
+	var admin authFileListResponse
+	callOK(t, app, http.MethodGet, routeAuthFiles, nil, nil, http.StatusOK, &admin)
+	byIndex := map[string]authFileView{}
+	for _, file := range admin.Files {
+		byIndex[file.AuthIndex] = file
+	}
+	pooled := byIndex[ccAuth].CC
+	if pooled == nil || !slices.Equal(pooled.Pools, []string{"Main"}) || pooled.Tier != ccbilling.TierMax5x || !pooled.ColdStart ||
+		pooled.WeeklyTotal != 1250 || pooled.RemainingWeek <= 0 {
+		t.Fatalf("pooled account CC = %+v", pooled)
+	}
+	if byIndex["auth-claude-2"].CC != nil {
+		t.Fatalf("an account outside every pool has CC estimates: %+v", byIndex["auth-claude-2"].CC)
+	}
+	response := callAccount(t, app, routeAuthFiles, ccRemainderKey, nil)
+	if response.StatusCode != http.StatusOK || bytes.Contains(response.Body, []byte(`"cc"`)) {
+		t.Fatalf("API key auth files = %d %s, want no CC estimates", response.StatusCode, response.Body)
 	}
 }
