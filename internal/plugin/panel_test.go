@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-key-billing/internal/ccbilling"
+	"cpa-cc-billing/internal/ccbilling"
 )
 
 type panelResponse struct {

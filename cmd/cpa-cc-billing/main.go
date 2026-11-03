@@ -66,7 +66,7 @@ import (
 	"net/http"
 	"unsafe"
 
-	"cpa-key-billing/internal/plugin"
+	"cpa-cc-billing/internal/plugin"
 )
 
 var app = plugin.NewApp()

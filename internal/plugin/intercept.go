@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 // Bound the retry hint so clients periodically recheck quota availability.

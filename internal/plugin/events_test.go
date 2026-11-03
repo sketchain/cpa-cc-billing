@@ -1,7 +1,7 @@
 package plugin
 
 import (
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 	"net/http"
 	"net/url"
 	"testing"

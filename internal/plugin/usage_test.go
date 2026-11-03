@@ -3,7 +3,7 @@ package plugin
 import (
 	"testing"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 func TestUsageBreakdownMatchesCurrentHostSemantics(t *testing.T) {

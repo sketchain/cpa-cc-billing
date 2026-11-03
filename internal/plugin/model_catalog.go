@@ -9,7 +9,7 @@ import (
 	"slices"
 	"strings"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 // Model catalogs list only the models a key's routing rules let it call. This

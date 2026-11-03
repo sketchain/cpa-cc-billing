@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"cpa-key-billing/internal/billing"
-	"cpa-key-billing/internal/ccbilling"
+	"cpa-cc-billing/internal/billing"
+	"cpa-cc-billing/internal/ccbilling"
 )
 
 // This file wires the CC split (internal/ccbilling) into the plugin. Upstream

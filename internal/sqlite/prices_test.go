@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 func TestCustomPriceUpdatesTouchOnlyTheirModelAndPublishAfterCommit(t *testing.T) {

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 func callManagement(t *testing.T, app *App, method, suffix string, query url.Values, body any) ManagementResponse {

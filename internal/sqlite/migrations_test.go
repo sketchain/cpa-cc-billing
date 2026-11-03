@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 func TestV12PriceMigrationPreservesModelIDsAndHistory(t *testing.T) {

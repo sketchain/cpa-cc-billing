@@ -11,8 +11,8 @@ import (
 	"time"
 	_ "time/tzdata"
 
-	"cpa-key-billing/internal/billing"
-	"cpa-key-billing/internal/messages"
+	"cpa-cc-billing/internal/billing"
+	"cpa-cc-billing/internal/messages"
 )
 
 func sourceFilterToken(scope, source string) string {

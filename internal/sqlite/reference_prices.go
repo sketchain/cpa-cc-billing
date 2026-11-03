@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 // Reference prices use a separate connection so queries do not take the billing
