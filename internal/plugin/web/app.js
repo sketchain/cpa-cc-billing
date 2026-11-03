@@ -18,7 +18,7 @@ function clearPageRefresh() {
 // hiding the document pauses the timer while retaining an overdue deadline.
 function schedulePageRefresh(page, loading) {
   const seconds = currentRole ? Number($((currentRole === "account" ? "account-" : "") + "auto-refresh").value) : 0;
-  if (!page?.autoRefresh || !seconds || loading) {
+  if (!page?.autoRefresh || !seconds || loading || page.refreshPaused?.()) {
     clearPageRefresh();
     return;
   }
@@ -302,6 +302,7 @@ function resetRoleData(role) {
     expandedPluginLogIDs.clear();
     resourceGroups.admin.configuration.syncErrors = [];
     panelQuery.clear();
+    resetCCState();
     keyDirectory.clear();
   }
   for (const entry of Object.values(resources[role])) Object.assign(entry, { value: null, error: "", readAt: 0 });

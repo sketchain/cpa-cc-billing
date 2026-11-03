@@ -21,6 +21,8 @@ const CC_TIERS = ["pro", "max5x", "max20x"];
 
 pages.admin.cc = {
   autoRefresh: true,
+  // Auto refresh would rebuild the inputs being edited; it waits for a save.
+  refreshPaused: () => ccState.dirty,
   queries: [ccQuery],
   load: (reload) => ccQuery.read("cc", () => plugin("GET", "/cc"), reload),
   sections: [{ sources: [ccQuery], render: renderCC, displayed: null }],
@@ -41,12 +43,49 @@ function ccNumber(value, digits = 2) {
   return Number.isFinite(value) ? Number(value).toLocaleString(locale(), { maximumFractionDigits: digits }) : "—";
 }
 function ccWhen(value) { return value && !String(value).startsWith("0001-") ? when(value) : "—"; }
-function ccTag(text, kind = "plain", tooltip) { return el("span", { class: "tag " + kind, text, tooltip }); }
+function ccTag(text, kind = "plain", tooltip) { return el("span", { class: "tag " + kind, text, "data-tip": tooltip || null }); }
 
 function ccMarkDirty() {
   ccState.dirty = true;
   updateCCButtons();
+  updateRefreshControls();
 }
+
+// A new session must not see the previous one's estimates or unsaved draft.
+function resetCCState() {
+  ccQuery.clear();
+  Object.assign(ccState, { draft: null, dirty: false, busy: false });
+  ccState.openBlocks.clear();
+}
+
+// Settings entries whose key or credential no longer exists. Credentials only
+// count as gone when their list loaded.
+function ccStaleEntries(data, draft) {
+  const keys = new Set(data.key_options.map((option) => option.scope));
+  const credentials = data.credential_warning ? null : new Set(data.credentials.map((item) => item.auth_index));
+  const accounts = credentials
+    ? [...new Set([...Object.keys(draft.accounts), ...draft.pools.flatMap((pool) => pool.auth_indexes)])].filter(
+        (index) => !credentials.has(index)
+      )
+    : [];
+  return { keys: Object.keys(draft.keys).filter((scope) => !keys.has(scope)), accounts };
+}
+
+function ccRemoveStale(data, draft) {
+  const stale = ccStaleEntries(data, draft);
+  for (const scope of stale.keys) delete draft.keys[scope];
+  for (const index of stale.accounts) {
+    delete draft.accounts[index];
+    for (const pool of draft.pools) {
+      pool.auth_indexes = pool.auth_indexes.filter((item) => item !== index);
+      if (pool.anchor_auth_index === index) pool.anchor_auth_index = pool.auth_indexes[0] || "";
+    }
+  }
+  ccMarkDirty();
+  renderCC();
+}
+
+function ccDeletedTag() { return ccTag(m("cc.deleted"), "bad", m("cc.deleted_tip")); }
 
 function updateCCButtons() {
   for (const id of ["cc-save", "cc-refresh", "cc-rebuild"]) if ($(id)) $(id).disabled = ccState.busy;
@@ -122,7 +161,27 @@ function renderCC() {
   draft.keys ||= {};
   draft.pools ||= [];
   const notices = [];
+  if (data.cc.loaded === false)
+    notices.push(
+      el(
+        "div",
+        { class: "notice err show cc-not-loaded", role: "alert" },
+        el("strong", { text: m("cc.not_loaded") }),
+        " ",
+        m(draft.params.refuse_remainder_when_unloaded ? "cc.not_loaded_refusing" : "cc.not_loaded_admitting")
+      )
+    );
   if (data.cc.error) notices.push(el("div", { class: "notice err show", text: m("cc.estimation_error", { v0: data.cc.error }) }));
+  const stale = ccStaleEntries(data, draft);
+  if (stale.keys.length || stale.accounts.length)
+    notices.push(
+      el(
+        "div",
+        { class: "notice show cc-stale" },
+        el("span", { text: m("cc.stale_entries", { v0: stale.keys.length, v1: stale.accounts.length }) }),
+        el("button", { type: "button", class: "link", text: m("cc.remove_stale"), onclick: () => ccRemoveStale(data, draft) })
+      )
+    );
   if (data.credential_warning)
     notices.push(el("div", { class: "notice err show", text: m("cc.credential_warning", { v0: data.credential_warning }) }));
   target.replaceChildren(
@@ -149,16 +208,19 @@ function ccAccountsSection(data, draft) {
       if (next.manual_k === null || next.manual_k === undefined) delete next.manual_k;
       if (Object.keys(next).length) draft.accounts[index] = next; else delete draft.accounts[index];
     };
-    const status = !view
-      ? ccTag(m("cc.not_estimated"))
-      : view.cold_start
-        ? ccTag(m("cc.cold_start"), "warn", m("cc.cold_start_tip", { v0: view.clean_blocks, v1: draft.params.cold_start_blocks }))
-        : ccTag(m("cc.estimated"), "ok");
+    const deleted = !data.credential_warning && !data.credentials.some((item) => item.auth_index === index);
+    const status = deleted
+      ? ccDeletedTag()
+      : !view
+        ? ccTag(m("cc.not_estimated"))
+        : view.cold_start
+          ? ccTag(m("cc.cold_start"), "warn", m("cc.cold_start_tip", { v0: view.clean_blocks, v1: draft.params.cold_start_blocks }))
+          : ccTag(m("cc.estimated"), "ok");
     const kGroup = (label, group) =>
       el("div", {
         class: group.valid ? "" : "muted",
         text: m(label, { v0: group.k > 0 ? ccNumber(group.k) : "—", v1: ccNumber(group.gain_5h, 0), v2: ccNumber(group.gain_7d, 0) }),
-        tooltip: group.valid ? "" : m("cc.k_group_insufficient", { v0: draft.params.k_min_weekly_points })
+        "data-tip": group.valid ? null : m("cc.k_group_insufficient", { v0: draft.params.k_min_weekly_points })
       });
     const kCell = view
       ? [
@@ -167,7 +229,7 @@ function ccAccountsSection(data, draft) {
           el("div", {
             class: "cc-k-final",
             text: m("cc.k_used_value", { v0: view.k ? ccNumber(view.k) : "—" }) + DISPLAY_SEPARATOR + m("cc.k_source_" + view.k_source),
-            tooltip: m("cc.k_basis_" + view.k_estimate.basis)
+            "data-tip": m("cc.k_basis_" + view.k_estimate.basis)
           })
         ]
       : "—";
@@ -198,10 +260,10 @@ function ccAccountsSection(data, draft) {
       el("td", {}, status),
       el("td", {
         text: view ? ccPercent(view.used_5h) + DISPLAY_SLASH + ccPercent(view.used_7d) : "—",
-        tooltip: view ? m("cc.resets_tip", { v0: ccWhen(view.reset_5h), v1: ccWhen(view.reset_7d) }) : ""
+        "data-tip": view ? m("cc.resets_tip", { v0: ccWhen(view.reset_5h), v1: ccWhen(view.reset_7d) }) : null
       }),
       el("td", { text: view ? (view.five_hour_total_usd > 0 ? ccUSD(view.five_hour_total_usd) : m("cc.unknown")) : "—" }),
-      el("td", { text: view ? ccUSD(view.weekly_total_usd) : "—", tooltip: view ? m("cc.totals_from_" + view.totals_from) : "" }),
+      el("td", { text: view ? ccUSD(view.weekly_total_usd) : "—", "data-tip": view ? m("cc.totals_from_" + view.totals_from) : null }),
       el("td", { class: "cc-k" }, kCell),
       el("td", { text: view ? ccUSD(view.remaining_week_usd) + DISPLAY_SLASH + ccUSD(view.remaining_five_hour_usd) : "—" }),
       el("td", { text: view ? m("cc.blocks_value", { v0: view.clean_blocks, v1: view.total_blocks }) : "—" }),
@@ -245,23 +307,48 @@ function ccPoolsSection(data, draft) {
   const cards = draft.pools.map((pool) => {
     const status = statuses.get(pool.id);
     const indexes = [...new Set([...data.credentials.map((item) => item.auth_index), ...pool.auth_indexes])];
+    const anchor = pool.auth_indexes.includes(pool.anchor_auth_index) ? pool.anchor_auth_index : pool.auth_indexes[0] || "";
     const accountChoices = indexes.map((index) => {
-      const position = pool.auth_indexes.indexOf(index);
+      const member = pool.auth_indexes.includes(index);
+      // An account's capacity can be shared out by one pool only.
+      const owner = draft.pools.find((other) => other !== pool && other.auth_indexes.includes(index));
       const input = el("input", {
         type: "checkbox",
-        checked: position >= 0,
+        checked: member,
+        disabled: !!owner,
         onchange: (event) => {
           pool.auth_indexes = event.target.checked ? [...pool.auth_indexes, index] : pool.auth_indexes.filter((item) => item !== index);
+          if (!pool.auth_indexes.includes(pool.anchor_auth_index)) pool.anchor_auth_index = pool.auth_indexes[0] || "";
           ccMarkDirty();
           renderCC();
         }
       });
+      const deleted = !data.credential_warning && !data.credentials.some((item) => item.auth_index === index);
       return el(
-        "label",
-        { class: "cc-check" },
-        input,
-        el("span", { text: ccCredentialName(data, index) }),
-        position === 0 && ccTag(m("cc.anchor_account"), "info", m("cc.anchor_account_tip"))
+        "span",
+        { class: "cc-check cc-pool-account" + (owner ? " muted" : "") },
+        el(
+          "label",
+          { class: "cc-check", "data-tip": owner ? m("cc.account_in_other_pool", { v0: owner.name || owner.id }) : null },
+          checkboxControl({ input }),
+          el("span", { text: ccCredentialName(data, index) }),
+          owner && el("span", { class: "muted small", text: m("cc.in_pool_value", { v0: owner.name || owner.id }) })
+        ),
+        deleted && ccDeletedTag(),
+        member &&
+          (index === anchor
+            ? ccTag(m("cc.anchor_account"), "info", m("cc.anchor_account_tip"))
+            : el("button", {
+                type: "button",
+                class: "link small",
+                text: m("cc.set_anchor"),
+                "data-tip": m("cc.anchor_account_tip"),
+                onclick: () => {
+                  pool.anchor_auth_index = index;
+                  ccMarkDirty();
+                  renderCC();
+                }
+              }))
       );
     });
     const metrics = status
@@ -322,7 +409,7 @@ function ccPoolsSection(data, draft) {
       type: "button",
       text: m("cc.add_pool"),
       onclick: () => {
-        draft.pools.push({ id: ccNewPoolID(draft), name: "", auth_indexes: [] });
+        draft.pools.push({ id: ccNewPoolID(draft), name: "", auth_indexes: [], anchor_auth_index: "" });
         ccMarkDirty();
         renderCC();
       }
@@ -343,14 +430,19 @@ function ccKeyStatus(key, option, settings) {
     return ccTag(m("cc.alignment_unknown"), "plain", m("cc.alignment_unknown_tip"));
   }
   if (key.admitted) return ccTag(m("cc.admitted"), "ok");
-  return ccTag(m("cc.refused_" + key.refusal), "bad", key.retry_at ? m("cc.retry_at", { v0: ccWhen(key.retry_at) }) : "");
+  const detail = window.billingI18n.serverMessage(key.refusal_message, "");
+  const retry = key.retry_at ? m("cc.retry_at", { v0: ccWhen(key.retry_at) }) : "";
+  return ccTag(m("cc.refused_" + key.refusal), "bad", [detail, retry].filter((part) => String(part)).join(DISPLAY_SEPARATOR) || null);
 }
 
 function ccKeysSection(data, draft) {
   const statuses = new Map(data.cc.keys.map((key) => [key.scope, key]));
   const options = [...data.key_options];
   for (const key of data.cc.keys)
-    if (!options.some((option) => option.scope === key.scope)) options.push({ scope: key.scope, preview: key.preview, label: key.label });
+    if (!options.some((option) => option.scope === key.scope))
+      options.push({ scope: key.scope, preview: key.preview, label: key.label, deleted: true });
+  for (const scope of Object.keys(draft.keys))
+    if (!options.some((option) => option.scope === scope)) options.push({ scope, deleted: true });
   const pools = draft.pools.map((pool) => [pool.id, pool.name || pool.id]);
   const rows = options.map((option) => {
     const settings = draft.keys[option.scope] || {};
@@ -375,7 +467,8 @@ function ccKeysSection(data, draft) {
         "td",
         {},
         renderAPIKeyIdentity({ scope: option.scope, preview: option.preview, label: option.label }),
-        option.plan_name && el("div", { class: "muted small", text: option.plan_name })
+        option.plan_name && el("div", { class: "muted small", text: option.plan_name }),
+        option.deleted && ccDeletedTag()
       ),
       el(
         "td",
@@ -426,7 +519,7 @@ function ccKeysSection(data, draft) {
       el("td", { text: fixed && status?.cycle_end ? ccWhen(status.cycle_end) : "—" }),
       el("td", {
         text: status ? ccUSD(status.balance_usd) : "—",
-        tooltip: status ? m("cc.reported_balance_tip", { v0: ccNumber(status.reported_balance_usd, 6) }) : ""
+        "data-tip": status ? m("cc.reported_balance_tip", { v0: ccNumber(status.reported_balance_usd, 6) }) : null
       }),
       el("td", {}, ccKeyStatus(status, option, settings))
     );
@@ -499,7 +592,44 @@ function ccParamsSection(data, draft) {
       el("span", { class: "muted small", text: m("cc.default_value", { v0: ccUSD(defaults.tier_weekly_usd[tier]) }) })
     )
   );
-  return ccSection(m("cc.parameters"), m("cc.parameters_hint"), el("div", { class: "cc-params" }, CC_PARAM_FIELDS.map(field), tiers));
+  const tierK = CC_TIERS.map((tier) =>
+    el(
+      "label",
+      { class: "cc-param", for: "cc-param-tier-k-" + tier },
+      el("span", { class: "cc-param-label", text: m("cc.tier_k_default", { v0: m("cc.tier_" + tier) }) }),
+      ccNumberInput(
+        params.tier_k[tier],
+        (next) => { params.tier_k[tier] = next === null ? defaults.tier_k[tier] : next; },
+        { id: "cc-param-tier-k-" + tier, min: "1", max: "100" }
+      ),
+      el("span", {
+        class: "muted small",
+        text: m("cc.hint_tier_k") + DISPLAY_SEPARATOR + m("cc.default_value", { v0: ccNumber(defaults.tier_k[tier]) })
+      })
+    )
+  );
+  const unloaded = el(
+    "label",
+    { class: "toggle-filter cc-param-switch" },
+    switchControl({
+      input: el("input", {
+        type: "checkbox",
+        role: "switch",
+        checked: params.refuse_remainder_when_unloaded,
+        onchange: (event) => {
+          params.refuse_remainder_when_unloaded = event.target.checked;
+          ccMarkDirty();
+        }
+      })
+    }),
+    el("span", { text: m("cc.param_refuse_unloaded") })
+  );
+  return ccSection(
+    m("cc.parameters"),
+    m("cc.parameters_hint"),
+    el("div", { class: "cc-params" }, CC_PARAM_FIELDS.map(field), tiers, tierK),
+    el("div", { class: "cc-param-toggle" }, unloaded, el("p", { class: "muted small", text: m("cc.hint_refuse_unloaded") }))
+  );
 }
 
 function ccBlocksSection(data) {
@@ -536,7 +666,7 @@ function ccBlocksSection(data) {
               el("td", { text: ccPercent(block.clean_gain) + DISPLAY_SLASH + ccUSD(block.clean_cost_usd) }),
               el("td", {
                 text: block.clean_cost_usd > 0 ? ccUSD(100 / (block.clean_gain / block.clean_cost_usd)) : "—",
-                tooltip: m("cc.block_ratio_tip")
+                "data-tip": m("cc.block_ratio_tip")
               }),
               el("td", { text: m("cc.reference_" + block.reference_mode) })
             )
@@ -612,6 +742,7 @@ $("cc-save").onclick = () =>
     ccRun(async () => {
       await plugin("PUT", "/cc/settings", ccState.draft);
       ccState.dirty = false;
+      updateRefreshControls();
       notify(m("cc.saved"));
     })
   );
