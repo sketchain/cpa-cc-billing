@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 func quotaUsageByLabel(t *testing.T, quota *authQuotaResponse) map[string]*billing.UsageTotal {

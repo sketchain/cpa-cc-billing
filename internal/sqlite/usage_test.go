@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 func TestUsageByModelAppliesEveryFilter(t *testing.T) {

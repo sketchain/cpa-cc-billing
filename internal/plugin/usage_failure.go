@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 func usageFailureDetails(failure UsageFailure) billing.RequestError {

@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 // The write-ahead log holds the most recently committed rows until a checkpoint,

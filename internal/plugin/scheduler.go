@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 const maxPoolsPerKey = 256

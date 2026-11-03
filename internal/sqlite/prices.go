@@ -4,10 +4,12 @@ import (
 	"database/sql"
 	"fmt"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
-func (d *DB) UpsertPrice(price billing.CustomPrice) error {
+func (d *DB) UpsertPrice(price billing.CustomPrice) error { return upsertPrice(d.db.Exec, price) }
+
+func upsertPrice(exec execer, price billing.CustomPrice) error {
 	if err := price.Validate(); err != nil {
 		return err
 	}
@@ -22,7 +24,7 @@ func (d *DB) UpsertPrice(price billing.CustomPrice) error {
 		tierRead = optionalPrice(tier.CacheReadPer1M)
 		tierWrite = optionalPrice(tier.CacheWritePer1M)
 	}
-	_, err := d.db.Exec(`
+	_, err := exec(`
         INSERT INTO prices (
             model_id, currency, input_per_1m, output_per_1m, cache_read_per_1m, cache_write_per_1m,
             long_context_threshold, long_context_input_per_1m, long_context_output_per_1m,

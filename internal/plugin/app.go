@@ -9,9 +9,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"cpa-key-billing/internal/billing"
-	"cpa-key-billing/internal/ccbilling"
-	"cpa-key-billing/internal/sqlite"
+	"cpa-cc-billing/internal/billing"
+	"cpa-cc-billing/internal/ccbilling"
+	"cpa-cc-billing/internal/sqlite"
 )
 
 type App struct {
@@ -29,6 +29,7 @@ type App struct {
 	pendingSequence       uint64
 	authModelsSupported   atomic.Bool
 	cc                    *ccbilling.Manager
+	ccBlocks              ccBlockLog
 }
 
 func (a *App) SetHostCaller(caller HostCaller) {

@@ -1775,7 +1775,8 @@ def key_rows():
         refresh_key_quota(key)
     return [dict(key, route_names={route["id"]: route["name"] for route in ROUTES
                                   if route["id"] in key["route_bindings"]["route_ids"]},
-                 credential_labels=credential_labels(key["route_bindings"]["credential_ids"] + key["route_bindings"].get("denied_credential_ids", []))) for key in KEYS]
+                 credential_labels=credential_labels(key["route_bindings"]["credential_ids"] + key["route_bindings"].get("denied_credential_ids", [])),
+                 cc_kind=CC_SETTINGS["keys"].get(key["scope"], {}).get("kind", "")) for key in KEYS]
 
 
 # CC split preview: one Claude account, one pool, one fixed and one remainder key.
@@ -1783,14 +1784,18 @@ CC_DEFAULT_PARAMS = {
     "segment_retention_days": 365, "block_gap_minutes": 5, "window_percent": 8, "reference_mode": "global",
     "suspicious_threshold": 0.2, "exclude_vote_share": 0.5, "weight_power": 2, "recent_days": 14, "recent_share": 0.9,
     "k_min_weekly_points": 10, "cold_start_blocks": 20, "tier_weekly_usd": {"pro": 250, "max5x": 1250, "max20x": 2500},
+    "tier_k": {"pro": 8, "max5x": 8, "max20x": 8}, "refuse_remainder_when_unloaded": True,
     "safety_factor": 0.9,
 }
 CC_SETTINGS = {
     "params": json.loads(json.dumps(CC_DEFAULT_PARAMS)),
-    "pools": [{"id": "pool-1", "name": "Claude 主账号", "auth_indexes": ["auth-demo-claude"]}],
+    "pools": [{"id": "pool-1", "name": "Claude 主账号", "auth_indexes": ["auth-demo-claude", "auth-removed-claude"], "anchor_auth_index": "auth-demo-claude"},
+              {"id": "pool-2", "name": "备用池", "auth_indexes": [], "anchor_auth_index": ""}],
     "accounts": {"auth-demo-claude": {"tier": "max5x"}},
     "keys": {LIVE_KEYS[0]["scope"]: {"kind": "fixed", "pool_id": "pool-1"},
-             LIVE_KEYS[1]["scope"]: {"kind": "remainder", "pool_id": "pool-1", "weekly_cap_usd": 300}},
+             LIVE_KEYS[1]["scope"]: {"kind": "remainder", "pool_id": "pool-1", "weekly_cap_usd": 300},
+             # A key deleted from CLIProxyAPI that the settings still list.
+             "f" * 64: {"kind": "remainder", "pool_id": "pool-2"}},
 }
 
 
@@ -1814,6 +1819,9 @@ def cc_auth_summaries():
                 "clean_blocks": account["clean_blocks"], "cold_start_blocks": CC_SETTINGS["params"]["cold_start_blocks"]})
             summary["pools"].append(pool["name"] or pool["id"])
     return summaries
+
+
+CC_LOADED = [True]
 
 
 def cc_payload():
@@ -1848,6 +1856,8 @@ def cc_payload():
             row["alignment"] = {"status": "aligned"}
         else:
             row.update(balance_usd=78.3, reported_balance_usd=78.3, admitted=False, refusal="five_hour_reserve",
+                       refusal_message={"message_key": "backend.cc_blocked_five_hour_reserve",
+                                        "message_params": {"v0": '"' + "Claude 主账号" + '"', "v1": "12.40", "v2": "13.50"}},
                        retry_at=iso(NOW + timedelta(hours=2, minutes=14)))
         keys.append(row)
     pools = [{"id": pool["id"], "name": pool["name"], "auth_indexes": pool["auth_indexes"], "remaining_week_usd": 135.8,
@@ -1857,8 +1867,12 @@ def cc_payload():
                    for item in AUTH_FILES if item["category"] == "claude"]
     options = [{"scope": key["scope"], "preview": key["preview"], "label": key["label"], "plan_name": key.get("plan_name", ""),
                 "has_weekly_window": True} for key in LIVE_KEYS]
+    if not CC_LOADED[0]:
+        return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "accounts": [], "pools": [], "keys": [],
+                       "stored_segments": 0, "at": iso(NOW), "loaded": False, "error": "database is locked"},
+                "credentials": credentials, "key_options": options, "credential_warning": ""}
     return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "accounts": accounts, "pools": pools, "keys": keys,
-                   "stored_segments": 1180, "at": iso(NOW)},
+                   "stored_segments": 1180, "at": iso(NOW), "loaded": True},
             "credentials": credentials, "key_options": options, "credential_warning": ""}
 
 
@@ -2487,6 +2501,11 @@ def main():
         help="Initial host theme; the preview shell can switch themes after startup.",
     )
     parser.add_argument(
+        "--cc-not-loaded",
+        action="store_true",
+        help="Preview the CC page while its estimates have not loaded.",
+    )
+    parser.add_argument(
         "--allow-api-key-quota-reset",
         action="store_true",
         help="Allow API key users to reset Codex auth file quotas.",
@@ -2496,6 +2515,7 @@ def main():
     Handler.host_mode = args.host
     Handler.initial_theme = args.theme
     Handler.allow_api_key_quota_reset = args.allow_api_key_quota_reset
+    CC_LOADED[0] = not args.cc_not_loaded
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     entry_path = "/ui" if args.host == "standalone" else "/"
     print(

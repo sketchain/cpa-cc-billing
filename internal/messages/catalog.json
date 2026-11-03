@@ -611,5 +611,54 @@
   "Cleanup age must be an integer from 0 to 106751": {
     "key": "backend.cleanup_age_must_be_an_integer",
     "formats": []
+  },
+  "CC pool %q has no Claude account.": {
+    "key": "backend.cc_pool_value_has_no_claude_account",
+    "formats": [
+      "%q"
+    ]
+  },
+  "API key blocked by the CC pool %q weekly reservation: the pool's estimated remaining weekly capacity $%.2f does not exceed the $%.2f reserved for fixed keys.": {
+    "key": "backend.cc_blocked_weekly_reserve",
+    "formats": [
+      "%q",
+      "%.2f",
+      "%.2f"
+    ]
+  },
+  "API key blocked by the CC pool %q 5-hour reservation: the pool's estimated remaining 5-hour capacity $%.2f does not exceed the $%.2f reserved for fixed keys.": {
+    "key": "backend.cc_blocked_five_hour_reserve",
+    "formats": [
+      "%q",
+      "%.2f",
+      "%.2f"
+    ]
+  },
+  "API key reached its own weekly cap in CC pool %q: $%.2f of $%.2f used.": {
+    "key": "backend.cc_blocked_weekly_cap",
+    "formats": [
+      "%q",
+      "%.2f",
+      "%.2f"
+    ]
+  },
+  "API key blocked because the CC estimates have not loaded yet; remainder keys wait until the pool's reservations can be computed.": {
+    "key": "backend.cc_blocked_not_loaded",
+    "formats": []
+  },
+  "Account %q is already in CC pool %q; an account can belong to only one pool": {
+    "key": "backend.cc_account_value_already_in_pool_value",
+    "formats": [
+      "%q",
+      "%q"
+    ]
+  },
+  "Fixed keys %s and %s share subscription plan %q but belong to different CC pools; give each pool its own plan": {
+    "key": "backend.cc_fixed_keys_share_plan_across_pools",
+    "formats": [
+      "%s",
+      "%s",
+      "%q"
+    ]
   }
 }

@@ -59,6 +59,7 @@ func (s *Store) recordUsage(event UsageEvent, failure *RequestError) {
 	cost := ComputeCost(price, event.Breakdown)
 	missingCycleTime := false
 	var recorded RequestEvent
+	var recordedSeq uint64
 	updateResult(s, func(state *State) (struct{}, Changes) {
 		// ServiceTier is the client-requested tier, not the upstream response tier.
 		if s.cfg.CodexFastModeBilling && price.Source != PriceSourceNone && event.Breakdown.Billable() &&
@@ -101,6 +102,8 @@ func (s *Store) recordUsage(event UsageEvent, failure *RequestError) {
 			Quota:               event.Quota,
 		}
 		recorded = entry
+		s.usageSeq++
+		recordedSeq = s.usageSeq
 		var changedKeys []string
 		if key := state.ensureKey(scope, event.KeyPreview); key != nil {
 			usage := quotaUsage{Spending: spent(cost.Total, cost.Currency)}
@@ -126,7 +129,7 @@ func (s *Store) recordUsage(event UsageEvent, failure *RequestError) {
 		}
 		return struct{}{}, changes
 	})
-	s.notifyUsage(recorded)
+	s.notifyUsage(recorded, recordedSeq)
 	if missingCycleTime {
 		s.AddPluginLog(PluginLogError, "Usage record has no request time; preserving the event without deducting quota")
 	}

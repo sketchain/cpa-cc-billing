@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 const testAPIKey = "sk-test-key-0001"

@@ -58,7 +58,7 @@ flowchart TB
 ### Concepts
 
 - **Account**: one Claude OAuth credential in CPA (by `auth_index`), estimated on its own.
-- **Pool**: a set of accounts that fixed and remainder keys share; its remaining capacity is the sum of its accounts'. The first account anchors the pool's weekly cycles and 5-hour window.
+- **Pool**: a set of accounts that fixed and remainder keys share; its remaining capacity is the sum of its accounts'. An anchor account, chosen with **Set as anchor** on the page, anchors the pool's weekly cycles and 5-hour window (pools saved before take their first account). An account can belong to only one pool; saving checks it.
 - **Fixed key**: bound, on the API Key page, to a subscription plan with a **7-day amount window**; that amount is its weekly quota. **Give each fixed key a plan of its own**: aligning cycles changes the plan itself, which affects every key bound to it.
 - **Remainder key**: may only use what the pool has left after the fixed keys' reservations, optionally under its own weekly cap.
 
@@ -71,7 +71,7 @@ Anthropic reports `anthropic-ratelimit-unified-5h-utilization` and `7d-utilizati
 3. **Contamination filtering**: 8-point windows slide segment by segment; a window whose ratio (points per USD) exceeds the reference by 20% is suspicious, and a segment is excluded when at least 50% of the windows covering it are suspicious. The reference is the global weighted average, or the block's own iterative average while there is no history. Outside usage only raises ratios, so filtering only errs conservatively. Blocks narrower than one window are judged as a whole against the global reference.
 4. **Global average**: clean block ratios weighted by `(clean gain)^p`; blocks of the last 14 days weigh 90%, older ones 10%. `T_5h = 100 / ratio`.
 5. **k = weekly / 5-hour total**: paired 5-hour and 7-day gains between consecutive reports in which neither window reset, stored in hourly buckets with the segment retention. Like the totals, k is time-weighted: the last 14 days and older evidence each give `k = Σ5h / Σ7d`, valid once that group's 7-day gain reaches 10 points; two valid groups combine 90% / 10%, one valid group is used alone, otherwise the combined ratio counts if the total is enough, and without that there is no k. A manual value overrides it. `T_week = k × T_5h`.
-6. **Cold start**: with fewer than 20 clean blocks, the tier's default weekly total applies (Pro $250, Max 5x $1250, Max 20x $2500). CPA's Claude credential files carry no tier, so choose it per account on the page (unset counts as Pro). In cold start `T_5h = default / k`; without a manual k and before k is estimated, 5-hour reservations stay off.
+6. **Cold start**: with fewer than 20 clean blocks, the tier's default weekly total applies (Pro $250, Max 5x $1250, Max 20x $2500). CPA's Claude credential files carry no tier, so choose it per account on the page (unset counts as Pro). In cold start `T_5h = default / k`. Without a manual k and before k is estimated, the tier's default k applies (8 for Pro, Max 5x and Max 20x, adjustable among the parameters); its source reads "tier default" and 5-hour reservations stay on.
 
 On synthetic data (whole-percent reports, concurrency, sporadic and sustained outside usage, 5-hour resets) the 5-hour total is within about +0.3% on clean data and about −3% (conservative) under sustained outside usage; k is within 1%.
 
@@ -80,8 +80,9 @@ On synthetic data (whole-percent reports, concurrency, sporadic and sustained ou
 - Per account: `R_week = s × T_week × (1 − u_7d)` and `R_5h = s × T_5h × (1 − u_5h)`, with safety factor `s` (0.9).
 - Per pool: `P_week = Σ fixed max(0, weekly − used this cycle)`; each fixed key reserves `max(0, min(weekly / k − used this 5h window, weekly remaining))` for 5 hours (the `1/k` share can be overridden per key).
 - A remainder key is admitted only when `Σ R_week > P_week` and, when 5-hour reservations are on, `Σ R_5h > Σ 5-hour reservations`. Refusals use the plugin's usual `429 rate_limit_error`; the message names the weekly reservation, the 5-hour reservation or the key's own weekly cap, and `Retry-After` points at that window's reset.
+- Each refusal is logged once per key, reason and window reset, with the key, the reason (`weekly_reserve`, `five_hour_reserve`, `weekly_cap`, `pool_unavailable` or `not_loaded`) and the estimate that decided it.
 - Fixed keys are only limited by their plan.
-- Admission only reads an in-memory snapshot: keys outside every pool are admitted without touching the estimator; pooled keys combine the snapshot's totals with live utilization and live costs from usage callbacks, with no database query and no wait for a refresh. Refreshes run synchronously at startup, from usage callbacks (after the request, at most once a minute, skipped while one runs) and from the page's buttons; the plugin starts no background thread. Until the first snapshot loads, every request is admitted (logged once) and the balance endpoint returns 503.
+- Admission only reads an in-memory snapshot: keys outside every pool are admitted without touching the estimator; pooled keys combine the snapshot's totals with live utilization and live costs from usage callbacks, with no database query and no wait for a refresh. Refreshes run synchronously at startup, from usage callbacks (after the request, at most once a minute, skipped while one runs) and from the page's buttons; the plugin starts no background thread. When the settings are loaded but no estimate snapshot exists yet, remainder keys get 429 with reason `not_loaded` while fixed keys and keys outside every pool are admitted; the **Refuse remainder keys while estimates are not loaded** parameter (on by default) turns this off, and the CC page shows that the estimates are not loaded. Until even the settings load, every request is admitted (logged once). The balance endpoint returns 503 until the estimates load. Fixed keys' alignment results are cached; when the cache does not hold (first request, plan change, wait over), admission writes the plan's new anchor once.
 
 ### Fixed key cycles
 
@@ -89,11 +90,11 @@ The plugin switches the 7-day window of a fixed key's plan to a shared cycle anc
 
 ### Settings
 
-Everything is set on the **CC split** page and stored in the database: segment retention (365 days, independent of request events), block gap (5 minutes), window width (8%), reference (global), suspicious threshold (20%), exclusion vote (50%), weight exponent p (2), recent period and share (14 days, 90%), weekly gain for k (10 points), cold start blocks (20), tier defaults ($250 / $1250 / $2500), safety factor (90%), each account's tier and manual k, and each key's type, pool, 5-hour share override or weekly cap.
+Everything is set on the **CC split** page and stored in the database: segment retention (365 days, independent of request events), block gap (5 minutes), window width (8%), reference (global), suspicious threshold (20%), exclusion vote (50%), weight exponent p (2), recent period and share (14 days, 90%), weekly gain for k (10 points), cold start blocks (20), tier defaults ($250 / $1250 / $2500), tier default k (8 each), refusing remainder keys while estimates are not loaded (on), safety factor (90%), each account's tier and manual k, each pool's accounts and anchor, and each key's type, pool, 5-hour share override or weekly cap. Fixed keys that share a plan must be in the same pool.
 
 ### Auth files page
 
-For Claude accounts in a CC pool, the auth files page (with **Quota estimate** on) and its detail drawer show the CC split's result instead of the estimate scaled by usage × 100 / used percent: the 5-hour and weekly totals, k with its source (auto or manual), R week / R 5h and the cold start state. They come from the latest estimate snapshot; opening the page does not refresh the estimates. Other accounts are unchanged.
+For Claude accounts in a CC pool, the auth files page (with **Quota estimate** on) and its detail drawer show the CC split's result instead of the estimate scaled by usage × 100 / used percent: the 5-hour and weekly totals, k with its source (auto, manual or tier default), R week / R 5h and the cold start state. They come from the latest estimate snapshot; opening the page does not refresh the estimates. Other accounts are unchanged.
 
 ### Balance endpoint for new-api
 
@@ -102,7 +103,7 @@ GET /v0/resource/plugins/cpa-cc-billing/balance
 Authorization: Bearer <downstream API key>
 ```
 
-It returns `{"object":"credit_summary","total_available": <USD>}` for the week only: weekly amount minus usage for a fixed key, `Σ R_week − P_week` for a remainder key (capped by its own cap). Zero or less is reported as `1`, because new-api disables a channel whose balance is zero or less. Keys outside every pool get 404, unknown keys 401.
+It returns `{"object":"credit_summary","total_available": <USD>}` for the week only: weekly amount minus usage for a fixed key, `Σ R_week − P_week` for a remainder key (capped by its own cap). Zero or less is reported as `1` on purpose, because new-api disables a channel whose balance is zero or less; the CC split page shows the actual value next to the reported one. A remainder key's balance is the whole pool's shared balance: several remainder keys of one pool each report the same amount, which must not be added up. Keys outside every pool get 404, unknown keys 401.
 
 In new-api, create an **Advanced Custom** channel with the CPA address as Base URL and the downstream key as its key, and add a balance route whose `incoming_path` is `/v1/dashboard/billing/credit_grants` (the path new-api queries for balances) and whose `upstream_path` is `/v0/resource/plugins/cpa-cc-billing/balance`, with no converter and the default `Authorization: Bearer` authentication:
 
@@ -123,7 +124,7 @@ Use **Import JSON** on the model pricing card, or `POST /v0/management/plugins/c
 1. Stop CLIProxyAPI and back up `plugins/cpa-key-billing-state-v1.db` with its `-wal` and `-shm` files if present.
 2. Copy it to `plugins/cpa-cc-billing-state-v1.db` (and the `-wal`/`-shm` files to the same new prefix).
 3. Remove the old plugin library and its `plugins.configs.cpa-key-billing` entry (running both would refuse and bill twice), then install this plugin with a `plugins.configs.cpa-cc-billing` entry.
-4. Start CLIProxyAPI. Keys, plans, routes, prices and request history are kept; the CC tables (`cc_meta`, `cc_segments`, `cc_streams`) are created automatically. The billing schema version is unchanged, so the original plugin can still open the file.
+4. Start CLIProxyAPI. Keys, plans, routes, prices and request history are kept; the CC tables (`cc_meta`, `cc_segments`, `cc_streams`, `cc_k_buckets`) are created automatically. The billing schema version is unchanged, so the original plugin can still open the file.
 5. On the **CC split** page, choose account tiers, create a pool and assign keys. Segments are built from the retained request history right away.
 
 ## Requirements

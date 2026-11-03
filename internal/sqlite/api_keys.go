@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 const insertKey = `

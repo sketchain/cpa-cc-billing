@@ -44,3 +44,9 @@
 .cc-auth-label { color: var(--text-secondary); }
 .cc-auth-value { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .drawer-section .cc-auth-summary { margin-top: 0; padding-top: 0; border-top: 0; font-size: 13px; }
+.cc-pool-account { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cc-pool-account.muted .cc-check { cursor: not-allowed; }
+.cc-param-toggle { margin-top: 14px; }
+.cc-param-toggle > p.muted { margin: 4px 0 0; }
+.cc-stale { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.reset-confirmation { display: grid; gap: 10px; white-space: normal; }

@@ -8,10 +8,13 @@ package ccbilling
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strings"
 	"time"
+
+	"cpa-cc-billing/internal/messages"
 )
 
 // Key kinds.
@@ -58,16 +61,26 @@ type Params struct {
 	ColdStartBlocks int `json:"cold_start_blocks"`
 	// Default weekly totals, in USD, while an account is in cold start.
 	TierWeeklyUSD map[string]float64 `json:"tier_weekly_usd"`
+	// TierK is the default weekly/5-hour ratio of each tier, used while an
+	// account has neither a manual nor an estimated k.
+	TierK map[string]float64 `json:"tier_k"`
+	// RefuseUnloaded refuses remainder keys while the settings are loaded
+	// but no estimate snapshot exists yet.
+	RefuseUnloaded bool `json:"refuse_remainder_when_unloaded"`
 	// SafetyFactor discounts an account's estimated remaining capacity.
 	SafetyFactor float64 `json:"safety_factor"`
 }
 
 // Pool groups the Claude accounts that fixed and remainder keys share. The
-// first credential anchors the cycles of the pool's keys.
+// anchor account's resets set the cycles and 5-hour window of the pool's
+// keys; normalized settings list it first.
 type Pool struct {
 	ID          string   `json:"id"`
 	Name        string   `json:"name"`
 	AuthIndexes []string `json:"auth_indexes"`
+	// Anchor is the anchor account. Settings saved before it existed, or
+	// naming an account outside the pool, use the first account.
+	Anchor string `json:"anchor_auth_index"`
 }
 
 // AccountSettings are the operator's per-account choices.
@@ -111,6 +124,8 @@ func DefaultParams() Params {
 		KMinWeeklyPoints:     10,
 		ColdStartBlocks:      20,
 		TierWeeklyUSD:        map[string]float64{TierPro: 250, TierMax5x: 1250, TierMax20x: 2500},
+		TierK:                map[string]float64{TierPro: 8, TierMax5x: 8, TierMax20x: 8},
+		RefuseUnloaded:       true,
 		SafetyFactor:         0.9,
 	}
 }
@@ -134,6 +149,14 @@ func (p Params) TierWeekly(tier string) float64 {
 		return value
 	}
 	return p.TierWeeklyUSD[TierPro]
+}
+
+// TierKFor is the default k of a tier; an unknown tier uses Pro's.
+func (p Params) TierKFor(tier string) float64 {
+	if value, ok := p.TierK[tier]; ok {
+		return value
+	}
+	return p.TierK[TierPro]
 }
 
 func finite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }
@@ -175,6 +198,16 @@ func (p Params) validate() error {
 			return fmt.Errorf("Unknown tier %q", tier)
 		}
 	}
+	for _, tier := range []string{TierPro, TierMax5x, TierMax20x} {
+		if value, ok := p.TierK[tier]; !ok || !finite(value) || value < 1 || value > 100 {
+			return fmt.Errorf("tier_k.%s must be from 1 to 100", tier)
+		}
+	}
+	for tier := range p.TierK {
+		if tier != TierPro && tier != TierMax5x && tier != TierMax20x {
+			return fmt.Errorf("Unknown tier %q", tier)
+		}
+	}
 	return nil
 }
 
@@ -185,11 +218,10 @@ func (s Settings) Normalized() (Settings, error) {
 	}
 	out := Settings{Params: s.Params, Pools: make([]Pool, 0, len(s.Pools)),
 		Accounts: make(map[string]AccountSettings, len(s.Accounts)), Keys: make(map[string]KeySettings, len(s.Keys))}
-	out.Params.TierWeeklyUSD = make(map[string]float64, len(s.Params.TierWeeklyUSD))
-	for tier, value := range s.Params.TierWeeklyUSD {
-		out.Params.TierWeeklyUSD[tier] = value
-	}
+	out.Params.TierWeeklyUSD = maps.Clone(s.Params.TierWeeklyUSD)
+	out.Params.TierK = maps.Clone(s.Params.TierK)
 	ids := map[string]bool{}
+	owners := map[string]string{}
 	for _, pool := range s.Pools {
 		pool.ID, pool.Name = strings.TrimSpace(pool.ID), strings.TrimSpace(pool.Name)
 		if pool.ID == "" || len(pool.ID) > 64 || ids[pool.ID] {
@@ -200,13 +232,31 @@ func (s Settings) Normalized() (Settings, error) {
 		}
 		ids[pool.ID] = true
 		var indexes []string
+		label := pool.Name
+		if label == "" {
+			label = pool.ID
+		}
 		for _, index := range pool.AuthIndexes {
 			if index = strings.TrimSpace(index); index != "" && !slices.Contains(indexes, index) {
+				// An account's capacity can only be shared out once.
+				if owner, taken := owners[index]; taken {
+					return Settings{}, messages.Errorf("Account %q is already in CC pool %q; an account can belong to only one pool", index, owner)
+				}
+				owners[index] = label
 				indexes = append(indexes, index)
 			}
 		}
 		if indexes == nil {
 			indexes = []string{}
+		}
+		pool.Anchor = strings.TrimSpace(pool.Anchor)
+		if anchor := slices.Index(indexes, pool.Anchor); anchor > 0 {
+			indexes = append(append([]string{pool.Anchor}, indexes[:anchor]...), indexes[anchor+1:]...)
+		} else if anchor < 0 {
+			pool.Anchor = ""
+			if len(indexes) > 0 {
+				pool.Anchor = indexes[0]
+			}
 		}
 		pool.AuthIndexes = indexes
 		out.Pools = append(out.Pools, pool)

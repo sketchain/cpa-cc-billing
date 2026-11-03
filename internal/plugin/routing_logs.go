@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 const maxPendingRouteLogs = 4096

@@ -2,6 +2,7 @@ package billing
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -129,8 +130,8 @@ func (s *Store) AlignWindowAnchor(planID string, periodSeconds int64, resetAt ti
 func (s *Store) SetClock(now func() time.Time) { s.now = now }
 
 // UsageObserver receives each recorded request after it is stored: its key,
-// request time and cost in USD.
-type UsageObserver func(scope string, at time.Time, costUSD float64)
+// request time, cost in USD and usage sequence number.
+type UsageObserver func(scope string, at time.Time, costUSD float64, seq uint64)
 
 // SetUsageObserver installs the observer recorded usage is reported to. It is
 // set once, before the store receives traffic.
@@ -140,12 +141,105 @@ func (s *Store) SetUsageObserver(observer UsageObserver) {
 	s.usageObserver = observer
 }
 
-func (s *Store) notifyUsage(event RequestEvent) {
+func (s *Store) notifyUsage(event RequestEvent, seq uint64) {
 	s.mu.RLock()
 	observer, rate := s.usageObserver, s.cfg.CNYPerUSD
 	s.mu.RUnlock()
 	if observer == nil || event.Scope == "" {
 		return
 	}
-	observer(event.Scope, event.At, rate.Convert(event.Cost.Total, event.Cost.Currency, USD))
+	observer(event.Scope, event.At, rate.Convert(event.Cost.Total, event.Cost.Currency, USD), seq)
+}
+
+// KeyViewForScopeAt is KeyViewForScope that also returns the usage sequence
+// number the view includes: every usage numbered at or below it is counted.
+func (s *Store) KeyViewForScopeAt(scope string) (KeyView, bool, uint64) {
+	scope = normalizeScope(scope)
+	if scope == "" {
+		return KeyView{}, false, 0
+	}
+	type result struct {
+		view KeyView
+		ok   bool
+		seq  uint64
+	}
+	current := updateResult(s, func(state *State) (result, Changes) {
+		key := state.Keys[scope]
+		if key == nil || !key.DeletedAt.IsZero() {
+			return result{seq: s.usageSeq}, Changes{}
+		}
+		now := s.Now()
+		changed := Changes{}
+		if settleExpiredCycles(key, now) {
+			changed.Keys = []string{scope}
+		}
+		return result{view: s.keyView(state, scope, key, now), ok: true, seq: s.usageSeq}, changed
+	})
+	return current.view, current.ok, current.seq
+}
+
+// UsageTotalsAt is UsageTotals that also returns the usage sequence number
+// the totals include.
+func (s *Store) UsageTotalsAt(scope string, queries []UsageQuery) ([]UsageTotal, uint64, error) {
+	type result struct {
+		totals []UsageTotal
+		seq    uint64
+	}
+	current, err := withRepository(s, func(repo Repository) (result, error) {
+		totals := make([]UsageTotal, len(queries))
+		cutoff := s.cfg.RequestEventRetentionDays.cutoff(s.Now())
+		for i, query := range queries {
+			if query.From.Before(cutoff) {
+				query.From = cutoff
+			}
+			total, err := repo.UsageTotal(scope, query, s.cfg.CNYPerUSD)
+			if err != nil {
+				return result{}, err
+			}
+			totals[i] = total
+		}
+		return result{totals: totals, seq: s.usageSeq}, nil
+	})
+	if err == nil && current.totals == nil {
+		// The repository is not open.
+		return nil, 0, fmt.Errorf("The billing database is not open")
+	}
+	return current.totals, current.seq, err
+}
+
+// UpsertPrices stores several custom prices as one change: when any of them
+// is invalid or cannot be saved, none is.
+func (s *Store) UpsertPrices(prices []CustomPrice) error {
+	prepared := make([]CustomPrice, len(prices))
+	for i, price := range prices {
+		price.ModelID = strings.TrimSpace(price.ModelID)
+		if price.Currency == "" {
+			price.Currency = USD
+		}
+		if err := price.Validate(); err != nil {
+			return err
+		}
+		prepared[i] = price
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range prepared {
+		if existing, found := s.state.Prices[NormalizeModelID(prepared[i].ModelID)]; found {
+			// Preserve the stored spelling when updating the same model.
+			prepared[i].ModelID = existing.ModelID
+		}
+	}
+	if s.repo != nil {
+		batch, ok := s.repo.(interface{ UpsertPrices([]CustomPrice) error })
+		if !ok {
+			return fmt.Errorf("The billing repository does not support batch price imports")
+		}
+		if err := batch.UpsertPrices(prepared); err != nil {
+			return err
+		}
+	}
+	for _, price := range prepared {
+		s.state.Prices[NormalizeModelID(price.ModelID)] = price
+	}
+	return nil
 }

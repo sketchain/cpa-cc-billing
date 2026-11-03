@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"cpa-key-billing/internal/billing"
-	"cpa-key-billing/internal/messages"
+	"cpa-cc-billing/internal/billing"
+	"cpa-cc-billing/internal/messages"
 )
 
 const (

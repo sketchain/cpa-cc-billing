@@ -9,13 +9,15 @@ import (
 	"strings"
 	"time"
 
-	"cpa-key-billing/internal/billing"
-	"cpa-key-billing/internal/messages"
+	"cpa-cc-billing/internal/billing"
+	"cpa-cc-billing/internal/messages"
 )
 
 type keyRow struct {
 	billing.KeyView
 	CredentialLabels map[string]string `json:"credential_labels"`
+	// CCKind is the key's CC split type, fixed or remainder, when assigned.
+	CCKind string `json:"cc_kind,omitempty"`
 }
 
 type routeRow struct {
@@ -27,7 +29,7 @@ func (a *App) keyRows() []keyRow {
 	keys := a.store.KeyViews()
 	rows := make([]keyRow, 0, len(keys))
 	for _, key := range keys {
-		rows = append(rows, keyRow{KeyView: key, CredentialLabels: a.credentialLabels(key.RouteBindings.CredentialRefs())})
+		rows = append(rows, keyRow{KeyView: key, CredentialLabels: a.credentialLabels(key.RouteBindings.CredentialRefs()), CCKind: a.ccKeyKind(key.Scope)})
 	}
 	return rows
 }

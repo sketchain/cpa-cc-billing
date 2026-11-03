@@ -1,9 +1,10 @@
 package ccbilling
 
 import (
-	"fmt"
 	"math"
 	"time"
+
+	"cpa-cc-billing/internal/messages"
 )
 
 // Sources of an account's totals and k.
@@ -56,24 +57,21 @@ func ResolveAccount(authIndex string, settings AccountSettings, estimate Estimat
 		status.K, status.KSource = settings.ManualK, SourceManual
 	case status.KAuto != nil:
 		status.K, status.KSource = status.KAuto, SourceAuto
+	default:
+		// Without a manual or estimated k the tier's default keeps the 5-hour
+		// reservation working.
+		tierK := params.TierKFor(status.Tier)
+		status.K, status.KSource = &tierK, SourceTier
 	}
 	status.ColdStart = estimate.CleanBlocks < params.ColdStartBlocks || estimate.FiveHourUSD <= 0
 	if status.ColdStart {
 		status.TotalsFrom = SourceTier
 		status.WeeklyTotal = params.TierWeekly(status.Tier)
-		if status.K != nil {
-			status.FiveHourTotal = status.WeeklyTotal / *status.K
-		}
+		status.FiveHourTotal = status.WeeklyTotal / *status.K
 	} else {
 		status.TotalsFrom = SourceEstimated
 		status.FiveHourTotal = estimate.FiveHourUSD
-		if status.K != nil {
-			status.WeeklyTotal = *status.K * estimate.FiveHourUSD
-		} else {
-			// Without k the 5-hour estimate says nothing about the week.
-			status.WeeklyTotal = params.TierWeekly(status.Tier)
-			status.FiveHourTotal = 0
-		}
+		status.WeeklyTotal = *status.K * estimate.FiveHourUSD
 	}
 	if latest.Has5h && latest.Reset5h.After(now) {
 		status.Used5h, status.Reset5h = latest.Used5h, latest.Reset5h
@@ -176,39 +174,46 @@ func BuildPool(pool Pool, accounts []AccountStatus, fixed []FixedKeyUsage) PoolS
 
 // Refusal reasons of a remainder key.
 const (
-	RefusedWeekly   = "weekly_reserve"
-	RefusedFiveHour = "five_hour_reserve"
-	RefusedCap      = "weekly_cap"
-	RefusedNoPool   = "pool_unavailable"
+	RefusedWeekly    = "weekly_reserve"
+	RefusedFiveHour  = "five_hour_reserve"
+	RefusedCap       = "weekly_cap"
+	RefusedNoPool    = "pool_unavailable"
+	RefusedNotLoaded = "not_loaded"
 )
 
-// Decision is the admission verdict for a remainder key.
+// Decision is the admission verdict for a remainder key. Message is the
+// English text clients receive; Detail carries it with translation metadata.
 type Decision struct {
 	Allowed bool
 	Reason  string
 	Message string
+	Detail  messages.Message
 	RetryAt time.Time
+}
+
+func refusal(reason string, retryAt time.Time, format string, args ...any) Decision {
+	detail := messages.New(format, args...)
+	return Decision{Reason: reason, Message: detail.Text, Detail: detail, RetryAt: retryAt}
 }
 
 // AdmitRemainder decides whether a remainder key may send a request now.
 // capUSD and usedCap describe its optional own weekly cap.
 func (p PoolStatus) AdmitRemainder(capUSD *float64, usedCap float64) Decision {
 	if len(p.Accounts) == 0 {
-		return Decision{Reason: RefusedNoPool, Message: fmt.Sprintf("CC pool %q has no Claude account.", p.label())}
+		return refusal(RefusedNoPool, time.Time{}, "CC pool %q has no Claude account.", p.label())
 	}
 	if p.RemainingWeek <= p.ReservedWeek {
-		return Decision{Reason: RefusedWeekly, RetryAt: p.Reset7d, Message: fmt.Sprintf(
+		return refusal(RefusedWeekly, p.Reset7d,
 			"API key blocked by the CC pool %q weekly reservation: the pool's estimated remaining weekly capacity $%.2f does not exceed the $%.2f reserved for fixed keys.",
-			p.label(), p.RemainingWeek, p.ReservedWeek)}
+			p.label(), p.RemainingWeek, p.ReservedWeek)
 	}
 	if p.FiveHourEnabled && p.RemainingFiveHour <= p.ReservedFiveHour {
-		return Decision{Reason: RefusedFiveHour, RetryAt: p.Reset5h, Message: fmt.Sprintf(
+		return refusal(RefusedFiveHour, p.Reset5h,
 			"API key blocked by the CC pool %q 5-hour reservation: the pool's estimated remaining 5-hour capacity $%.2f does not exceed the $%.2f reserved for fixed keys.",
-			p.label(), p.RemainingFiveHour, p.ReservedFiveHour)}
+			p.label(), p.RemainingFiveHour, p.ReservedFiveHour)
 	}
 	if capUSD != nil && usedCap >= *capUSD {
-		return Decision{Reason: RefusedCap, RetryAt: p.Reset7d, Message: fmt.Sprintf(
-			"API key reached its own weekly cap in CC pool %q: $%.2f of $%.2f used.", p.label(), usedCap, *capUSD)}
+		return refusal(RefusedCap, p.Reset7d, "API key reached its own weekly cap in CC pool %q: $%.2f of $%.2f used.", p.label(), usedCap, *capUSD)
 	}
 	return Decision{Allowed: true}
 }

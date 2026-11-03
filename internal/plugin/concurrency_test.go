@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 func concurrencyApp(t *testing.T, limit int) *App {

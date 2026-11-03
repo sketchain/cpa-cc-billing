@@ -404,9 +404,9 @@ func TestKGroupFallbacks(t *testing.T) {
 			t.Errorf("%s: %+v", test.name, estimate)
 		}
 	}
-	// Without a valid k, cold start keeps the 5-hour reservation off.
+	// Without a valid k, cold start uses the tier's default k.
 	status := ResolveAccount("a", AccountSettings{Tier: TierPro}, Estimate{}, EstimateK(nil, params, now), Observation{}, params, now)
-	if status.K != nil || status.FiveHourTotal != 0 || status.WeeklyTotal != 250 || !status.ColdStart {
+	if status.K == nil || *status.K != 8 || status.KSource != SourceTier || status.FiveHourTotal != 250.0/8 || status.WeeklyTotal != 250 || !status.ColdStart {
 		t.Fatalf("status = %+v", status)
 	}
 }
@@ -421,13 +421,18 @@ func TestColdStartSwitchesToEstimate(t *testing.T) {
 	latest := Observation{At: now.Add(-time.Minute), Has5h: true, Used5h: 20, Reset5h: now.Add(time.Hour), Has7d: true, Used7d: 50, Reset7d: now.Add(48 * time.Hour)}
 
 	// Few blocks: cold start uses the tier default; without a manual k and
-	// before k is estimated, there is no 5-hour total.
+	// before k is estimated, the tier's default k gives the 5-hour total.
 	early := EstimateSegments(segments[:40], params, now)
 	kEstimate := EstimateK(kFrom(sim, now, params), params, now)
 	status := ResolveAccount("a", AccountSettings{Tier: TierMax5x}, early, KEstimate{}, latest, params, now)
-	if !status.ColdStart || status.WeeklyTotal != 1250 || status.FiveHourTotal != 0 || status.KSource != SourceNone {
+	if !status.ColdStart || status.WeeklyTotal != 1250 || status.FiveHourTotal != 1250.0/8 || status.KSource != SourceTier {
 		t.Fatalf("cold status = %+v", status)
 	}
+	params.TierK[TierMax5x] = 5
+	if tuned := ResolveAccount("a", AccountSettings{Tier: TierMax5x}, early, KEstimate{}, latest, params, now); tuned.FiveHourTotal != 250 {
+		t.Fatalf("tier k override = %+v", tuned)
+	}
+	params.TierK[TierMax5x] = 8
 	manual := 5.0
 	status = ResolveAccount("a", AccountSettings{Tier: TierMax5x, ManualK: &manual}, early, KEstimate{}, latest, params, now)
 	if status.FiveHourTotal != 250 || status.KSource != SourceManual {

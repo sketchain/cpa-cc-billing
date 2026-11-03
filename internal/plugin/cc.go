@@ -10,10 +10,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"cpa-key-billing/internal/billing"
-	"cpa-key-billing/internal/ccbilling"
+	"cpa-cc-billing/internal/billing"
+	"cpa-cc-billing/internal/ccbilling"
+	"cpa-cc-billing/internal/messages"
 )
 
 // This file wires the CC split (internal/ccbilling) into the plugin. Upstream
@@ -133,11 +135,11 @@ func (h *ccHost) WeeklyPeriod(authIndex string, now time.Time) (ccbilling.Weekly
 }
 
 func (h *ccHost) KeyInfo(scope string) (ccbilling.KeyInfo, bool) {
-	view, ok := h.app.store.KeyViewForScope(scope)
+	view, ok, seq := h.app.store.KeyViewForScopeAt(scope)
 	if !ok {
-		return ccbilling.KeyInfo{}, false
+		return ccbilling.KeyInfo{Seq: seq}, false
 	}
-	info := ccbilling.KeyInfo{Preview: view.Preview, Label: view.Label, PlanID: view.PlanID}
+	info := ccbilling.KeyInfo{Preview: view.Preview, Label: view.Label, PlanID: view.PlanID, Seq: seq}
 	for _, plan := range h.app.store.Plans() {
 		if plan.ID == view.PlanID {
 			revision, _ := json.Marshal(plan)
@@ -165,16 +167,17 @@ func (h *ccHost) KeyInfo(scope string) (ccbilling.KeyInfo, bool) {
 	return info, true
 }
 
-func (h *ccHost) KeyUsageUSD(scope string, from, to time.Time) (float64, error) {
+func (h *ccHost) KeyUsageUSD(scope string, from, to time.Time) (float64, uint64, error) {
 	if !from.Before(to) {
-		return 0, nil
+		// An empty range reads nothing, so it includes no usage either.
+		return 0, 0, nil
 	}
 	// Include requests made at the current instant.
-	totals, err := h.app.store.UsageTotals(scope, []billing.UsageQuery{{From: from, To: to.Add(time.Nanosecond)}})
-	if err != nil || len(totals) == 0 {
-		return 0, err
+	totals, seq, err := h.app.store.UsageTotalsAt(scope, []billing.UsageQuery{{From: from, To: to.Add(time.Nanosecond)}})
+	if err != nil {
+		return 0, 0, err
 	}
-	return totals[0].CostUSD, nil
+	return totals[0].CostUSD, seq, nil
 }
 
 func (h *ccHost) AlignWeekly(planID string, resetAt time.Time) (ccbilling.Alignment, error) {
@@ -255,12 +258,13 @@ func (a *App) ccAdmission(sourceFormat, scope string, generate bool) (RequestInt
 	if decision.Allowed || !generate {
 		return RequestInterceptResponse{}, false
 	}
+	a.ccReportBlock(scope, decision)
 	headers := http.Header{"Content-Type": []string{"application/json; charset=utf-8"}}
 	if retryAfter := retryAfterSeconds(decision.RetryAt, a.store.Now()); retryAfter > 0 {
 		headers.Set("Retry-After", strconv.Itoa(retryAfter))
 	}
 	message := decision.Message
-	if !decision.RetryAt.IsZero() {
+	if !decision.RetryAt.IsZero() && decision.Reason != ccbilling.RefusedNotLoaded {
 		message += " The window resets at " + decision.RetryAt.UTC().Format(time.RFC3339) + "."
 	}
 	return RequestInterceptResponse{
@@ -327,7 +331,7 @@ func (a *App) ccPutSettings(req ManagementRequest) ManagementResponse {
 	}
 	stored, err := a.cc.SetSettings(settings)
 	if err != nil {
-		return JSONError(http.StatusBadRequest, "invalid", err.Error())
+		return jsonMessageError(http.StatusBadRequest, "invalid", messages.FromError(err))
 	}
 	return JSONResponse(http.StatusOK, map[string]any{"settings": stored})
 }
@@ -442,10 +446,9 @@ func (a *App) importPriceList(req ManagementRequest) ManagementResponse {
 	if len(prices) == 0 {
 		return JSONError(http.StatusBadRequest, "invalid", "The price list contains no models")
 	}
-	for _, price := range prices {
-		if _, err := a.store.UpsertPrice(price); err != nil {
-			return errorResponse(err)
-		}
+	// One transaction: a failure leaves every existing price as it was.
+	if err := a.store.UpsertPrices(prices); err != nil {
+		return errorResponse(err)
 	}
 	return JSONResponse(http.StatusOK, map[string]any{"models": models, "model_ids": len(prices)})
 }
@@ -498,4 +501,57 @@ func (a *App) ccAttachAuthFiles(views []authFileView) {
 			views[i].CC = &summary
 		}
 	}
+}
+
+// ccBlockLog remembers which CC refusals were logged: one line per key,
+// reason and window reset, like the subscription quota's block log.
+type ccBlockLog struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+}
+
+// ccReportBlock logs a remainder key's refusal once per key, reason and
+// window, with the estimate that decided it.
+func (a *App) ccReportBlock(scope string, decision ccbilling.Decision) {
+	now := a.store.Now()
+	signature := scope + "\x00" + decision.Reason + "\x00" + decision.RetryAt.UTC().Format(time.RFC3339)
+	if decision.Reason == ccbilling.RefusedNotLoaded {
+		// Its retry time moves with every request; one line per load is enough.
+		signature = scope + "\x00" + decision.Reason
+	}
+	expires := decision.RetryAt
+	if !expires.After(now) {
+		expires = now.Add(time.Hour)
+	}
+	a.ccBlocks.mu.Lock()
+	if a.ccBlocks.seen == nil {
+		a.ccBlocks.seen = map[string]time.Time{}
+	}
+	for key, until := range a.ccBlocks.seen {
+		if !until.After(now) {
+			delete(a.ccBlocks.seen, key)
+		}
+	}
+	_, logged := a.ccBlocks.seen[signature]
+	a.ccBlocks.seen[signature] = expires
+	a.ccBlocks.mu.Unlock()
+	if logged {
+		return
+	}
+	name := scope
+	if view, ok := a.store.KeyViewForScope(scope); ok {
+		name = view.Preview
+		if view.Label != "" {
+			name = view.Label + " (" + view.Preview + ")"
+		}
+	}
+	a.store.AddPluginLog(billing.PluginLogInfo, "CC blocked: %s reason=%s: %s", name, decision.Reason, decision.Message)
+}
+
+// ccKeyKind is a key's CC split type for the API key page.
+func (a *App) ccKeyKind(scope string) string {
+	if a.cc == nil {
+		return ""
+	}
+	return a.cc.KeyKind(scope)
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -14,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"cpa-key-billing/internal/billing"
-	"cpa-key-billing/internal/ccbilling"
+	"cpa-cc-billing/internal/billing"
+	"cpa-cc-billing/internal/ccbilling"
 )
 
 const (
@@ -145,13 +146,14 @@ func TestCCRemainderKeyWeeklyAndFiveHourReservations(t *testing.T) {
 		t.Fatalf("fixed balance = %d %.4f, want 100", status, balance)
 	}
 
-	// Without k the 5-hour reservation stays off; a manual k of 5 enables it:
-	// T_5h = $250, R_5h = 0.9 × 250 × 0.05 = $11.25 against a $20 reservation.
+	// Without a manual or estimated k the tier's default k of 8 applies:
+	// T_5h = $156.25, R_5h = 0.9 × 156.25 × 0.05 = $7.03 against $12.50.
 	clock.now = clock.now.Add(time.Minute)
 	ccUsage(t, app, ccRemainderKey, 0.5, 0.95, 0.40, reset5h, reset7d)
-	if response := ccAdmit(t, app, ccRemainderKey); response.Terminate {
-		t.Fatalf("5-hour reservation applied without k: %s", response.ResponseBody)
+	if response := ccAdmit(t, app, ccRemainderKey); !response.Terminate || !strings.Contains(refusalMessage(t, response), "$12.50 reserved") {
+		t.Fatalf("5-hour refusal with the tier k = %+v", response)
 	}
+	// A manual k of 5: T_5h = $250, R_5h = $11.25 against a $20 reservation.
 	var view struct {
 		CC ccbilling.View `json:"cc"`
 	}
@@ -180,7 +182,9 @@ func TestCCRemainderKeyWeeklyAndFiveHourReservations(t *testing.T) {
 		t.Fatalf("account view = %+v", view.CC.Accounts)
 	}
 
-	// A remainder key's own weekly cap.
+	// A remainder key's own weekly cap, once the 5-hour window has room again.
+	clock.now = clock.now.Add(time.Minute)
+	ccUsage(t, app, ccRemainderKey, 0.5, 0.10, 0.40, reset5h.Add(5*time.Hour), reset7d)
 	capUSD := 0.75
 	settings.Accounts[ccAuth] = ccbilling.AccountSettings{Tier: ccbilling.TierMax5x}
 	settings.Keys[billing.CallerScope(ccRemainderKey)] = ccbilling.KeySettings{Kind: ccbilling.KeyRemainder, PoolID: "main", WeeklyCapUSD: &capUSD}
@@ -436,4 +440,96 @@ func TestAuthFilesCarryCCEstimates(t *testing.T) {
 	if response.StatusCode != http.StatusOK || bytes.Contains(response.Body, []byte(`"cc"`)) {
 		t.Fatalf("API key auth files = %d %s, want no CC estimates", response.StatusCode, response.Body)
 	}
+}
+
+func ccBlockLogs(t *testing.T, app *App) []string {
+	t.Helper()
+	var page struct {
+		Entries []struct {
+			Message string `json:"message"`
+		} `json:"entries"`
+	}
+	callOK(t, app, http.MethodGet, routePluginLogs, url.Values{"level": {"all"}}, nil, http.StatusOK, &page)
+	var lines []string
+	for _, entry := range page.Entries {
+		if strings.HasPrefix(entry.Message, "CC blocked:") {
+			lines = append(lines, entry.Message)
+		}
+	}
+	return lines
+}
+
+func TestCCRefusalsAreLoggedOncePerWindow(t *testing.T) {
+	app, clock := newCCTestApp(t)
+	reset5h, reset7d := clock.now.Add(3*time.Hour), clock.now.Add(4*24*time.Hour)
+	ccUsage(t, app, ccRemainderKey, 0.5, 0.10, 0.92, reset5h, reset7d)
+	for range 3 {
+		if response := ccAdmit(t, app, ccRemainderKey); !response.Terminate {
+			t.Fatal("remainder key admitted")
+		}
+	}
+	lines := ccBlockLogs(t, app)
+	if len(lines) != 1 || !strings.Contains(lines[0], "reason=weekly_reserve") || !strings.Contains(lines[0], "$90.00") ||
+		!strings.Contains(lines[0], "$100.00") {
+		t.Fatalf("block logs = %q", lines)
+	}
+	// A new weekly window logs again.
+	clock.now = clock.now.Add(time.Minute)
+	ccUsage(t, app, ccRemainderKey, 0.5, 0.10, 0.92, reset5h, reset7d.Add(ccbilling.Week))
+	ccAdmit(t, app, ccRemainderKey)
+	if lines := ccBlockLogs(t, app); len(lines) != 2 {
+		t.Fatalf("block logs after a new window = %q", lines)
+	}
+}
+
+func TestCCSettingsRejectSharedAccountsAndPlans(t *testing.T) {
+	app, _ := newCCTestApp(t)
+	var view struct {
+		CC ccbilling.View `json:"cc"`
+	}
+	callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, &view)
+	if pool := view.CC.Settings.Pools[0]; pool.Anchor != ccAuth {
+		t.Fatalf("anchor of a pool saved without one = %q", pool.Anchor)
+	}
+	var failure struct {
+		Error struct {
+			Key string `json:"message_key"`
+		} `json:"error"`
+	}
+
+	duplicate := view.CC.Settings
+	duplicate.Pools = append(duplicate.Pools, ccbilling.Pool{ID: "spare", AuthIndexes: []string{ccAuth}})
+	callOK(t, app, http.MethodPut, routeCCConfig, nil, duplicate, http.StatusBadRequest, &failure)
+	if failure.Error.Key != "backend.cc_account_value_already_in_pool_value" {
+		t.Fatalf("duplicate account error key = %q", failure.Error.Key)
+	}
+
+	const otherFixed = "sk-cc-fixed-0002"
+	if _, err := app.store.SyncKeys([]string{ccFixedKey, ccRemainderKey, otherFixed}, false); err != nil {
+		t.Fatal(err)
+	}
+	callOK(t, app, http.MethodPost, routeKeysBind, nil, map[string]string{"scope": billing.CallerScope(otherFixed), "plan_id": "fixed-a"}, http.StatusOK, nil)
+	shared := view.CC.Settings
+	shared.Pools = append(shared.Pools, ccbilling.Pool{ID: "second", AuthIndexes: []string{"auth-claude-2"}})
+	shared.Keys[billing.CallerScope(otherFixed)] = ccbilling.KeySettings{Kind: ccbilling.KeyFixed, PoolID: "second"}
+	failure.Error.Key = ""
+	callOK(t, app, http.MethodPut, routeCCConfig, nil, shared, http.StatusBadRequest, &failure)
+	if failure.Error.Key != "backend.cc_fixed_keys_share_plan_across_pools" {
+		t.Fatalf("shared plan error key = %q", failure.Error.Key)
+	}
+	// Key rows tell the API key page which keys are CC fixed keys.
+	for _, row := range readKeyRows(t, app) {
+		if row.Scope == billing.CallerScope(ccFixedKey) && row.CCKind != ccbilling.KeyFixed {
+			t.Fatalf("fixed key row cc_kind = %q", row.CCKind)
+		}
+	}
+}
+
+func readKeyRows(t *testing.T, app *App) []keyRow {
+	t.Helper()
+	var response struct {
+		Keys []keyRow `json:"keys"`
+	}
+	callOK(t, app, http.MethodGet, routeKeys, nil, nil, http.StatusOK, &response)
+	return response.Keys
 }

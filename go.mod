@@ -1,4 +1,4 @@
-module cpa-key-billing
+module cpa-cc-billing
 
 go 1.24
 

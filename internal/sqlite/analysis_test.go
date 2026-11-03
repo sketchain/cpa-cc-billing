@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-key-billing/internal/billing"
+	"cpa-cc-billing/internal/billing"
 )
 
 func TestAnalysisAggregatesOnlyDisplayedUsageDistributions(t *testing.T) {

@@ -91,6 +91,19 @@ function setSelectedConcurrency(keys, raw) {
   });
 }
 
+// Resetting a CC fixed key grants it a full new week, which the pool reserves
+// again although the Claude accounts recovered nothing.
+function withFixedKeyResetWarning(note, keys) {
+  const fixed = keys.filter((key) => key.cc_kind === "fixed").length;
+  if (!fixed) return note;
+  return el(
+    "div",
+    { class: "reset-confirmation" },
+    el("div", { text: note }),
+    el("div", { class: "notice err show cc-reset-warning", text: m("ui.cc_fixed_key_reset_warning", { v0: fixed }) })
+  );
+}
+
 function resetSelectedKeys(keys) {
   const shared = keys.filter((key) => key.windows[0]?.cycle_anchor_at).length;
   const note =
@@ -99,11 +112,15 @@ function resetSelectedKeys(keys) {
       : shared === 0
         ? m("ui.all_quota_cycles_will_end_new_cycles_start_when_the_next_request_is_admitted")
         : m("ui.batch_reset_mixed_cycles");
-  return openActionDialog(m("ui.batch_reset_subscription_quota", { count: keys.length }), note, undefined, () =>
-    keySelection.run(keys, (_, group) => writeAdmin("POST", "/keys/reset", { mode: "all", scopes: group.map((key) => key.scope) }), {
-      groupBy: () => "reset",
-      success: m("ui.subscription_quota_reset")
-    })
+  return openActionDialog(
+    m("ui.batch_reset_subscription_quota", { count: keys.length }),
+    withFixedKeyResetWarning(note, keys),
+    undefined,
+    () =>
+      keySelection.run(keys, (_, group) => writeAdmin("POST", "/keys/reset", { mode: "all", scopes: group.map((key) => key.scope) }), {
+        groupBy: () => "reset",
+        success: m("ui.subscription_quota_reset")
+      })
   );
 }
 
@@ -256,9 +273,12 @@ function renderKeys() {
             onclick: () =>
               openActionDialog(
                 m("ui.reset_subscription_quota"),
-                view.windows[0]?.cycle_anchor_at
-                  ? m("ui.clear_usage_in_all_windows_and_keep_the_scheduled_reset_times")
-                  : m("ui.all_quota_cycles_will_end_new_cycles_start_when_the_next_request_is_admitted"),
+                withFixedKeyResetWarning(
+                  view.windows[0]?.cycle_anchor_at
+                    ? m("ui.clear_usage_in_all_windows_and_keep_the_scheduled_reset_times")
+                    : m("ui.all_quota_cycles_will_end_new_cycles_start_when_the_next_request_is_admitted"),
+                  [view]
+                ),
                 undefined,
                 async () => {
                   await mutateAdmin("POST", "/keys/reset", { mode: "all", scopes: [view.scope] });
@@ -431,7 +451,10 @@ $("keys-import-labels").onclick = () => {
 $("keys-reset-all").onclick = () =>
   openActionDialog(
     m("ui.reset_all_subscription_quotas"),
-    m("ui.clear_usage_for_all_non_deleted_api_keys_bound_to_a_plan_shared_cycles_keep_their_res"),
+    withFixedKeyResetWarning(
+      m("ui.clear_usage_for_all_non_deleted_api_keys_bound_to_a_plan_shared_cycles_keep_their_res"),
+      (resources.admin.keys.value || []).filter((key) => !key.deleted_at && key.plan_id)
+    ),
     undefined,
     async () => {
       const result = await mutateAdmin("POST", "/keys/reset", { mode: "global" });

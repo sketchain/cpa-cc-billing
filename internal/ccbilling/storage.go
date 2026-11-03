@@ -127,6 +127,14 @@ func loadSettings(db *sql.DB) (Settings, error) {
 			settings.Params.TierWeeklyUSD[tier] = value
 		}
 	}
+	if settings.Params.TierK == nil {
+		settings.Params.TierK = map[string]float64{}
+	}
+	for tier, value := range defaults.TierK {
+		if _, ok := settings.Params.TierK[tier]; !ok {
+			settings.Params.TierK[tier] = value
+		}
+	}
 	return settings.Normalized()
 }
 
