@@ -2,6 +2,7 @@ package billing
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -204,4 +205,41 @@ func (s *Store) UsageTotalsAt(scope string, queries []UsageQuery) ([]UsageTotal,
 		return nil, 0, fmt.Errorf("The billing database is not open")
 	}
 	return current.totals, current.seq, err
+}
+
+// UpsertPrices stores several custom prices as one change: when any of them
+// is invalid or cannot be saved, none is.
+func (s *Store) UpsertPrices(prices []CustomPrice) error {
+	prepared := make([]CustomPrice, len(prices))
+	for i, price := range prices {
+		price.ModelID = strings.TrimSpace(price.ModelID)
+		if price.Currency == "" {
+			price.Currency = USD
+		}
+		if err := price.Validate(); err != nil {
+			return err
+		}
+		prepared[i] = price
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range prepared {
+		if existing, found := s.state.Prices[NormalizeModelID(prepared[i].ModelID)]; found {
+			// Preserve the stored spelling when updating the same model.
+			prepared[i].ModelID = existing.ModelID
+		}
+	}
+	if s.repo != nil {
+		batch, ok := s.repo.(interface{ UpsertPrices([]CustomPrice) error })
+		if !ok {
+			return fmt.Errorf("The billing repository does not support batch price imports")
+		}
+		if err := batch.UpsertPrices(prepared); err != nil {
+			return err
+		}
+	}
+	for _, price := range prepared {
+		s.state.Prices[NormalizeModelID(price.ModelID)] = price
+	}
+	return nil
 }

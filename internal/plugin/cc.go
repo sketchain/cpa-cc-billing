@@ -446,10 +446,9 @@ func (a *App) importPriceList(req ManagementRequest) ManagementResponse {
 	if len(prices) == 0 {
 		return JSONError(http.StatusBadRequest, "invalid", "The price list contains no models")
 	}
-	for _, price := range prices {
-		if _, err := a.store.UpsertPrice(price); err != nil {
-			return errorResponse(err)
-		}
+	// One transaction: a failure leaves every existing price as it was.
+	if err := a.store.UpsertPrices(prices); err != nil {
+		return errorResponse(err)
 	}
 	return JSONResponse(http.StatusOK, map[string]any{"models": models, "model_ids": len(prices)})
 }
