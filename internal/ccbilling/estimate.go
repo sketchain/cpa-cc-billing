@@ -49,6 +49,21 @@ type Estimate struct {
 // EstimateSegments filters each block of chronologically ordered segments and
 // combines the clean blocks into a global ratio as of now.
 func EstimateSegments(segments []Segment, params Params, now time.Time) Estimate {
+	return estimateSegments(segments, params, now, nil)
+}
+
+// SegmentExclusions reports, for each segment, whether the estimate's
+// contamination filter excludes it. The filter is a pure function of the
+// segments and parameters, so the same inputs give the estimate's own result.
+func SegmentExclusions(segments []Segment, params Params, now time.Time) []bool {
+	excluded := make([]bool, len(segments))
+	estimateSegments(segments, params, now, excluded)
+	return excluded
+}
+
+// estimateSegments fills excluded, when it is not nil, with each segment's
+// filtering outcome.
+func estimateSegments(segments []Segment, params Params, now time.Time, excluded []bool) Estimate {
 	var result Estimate
 	for start := 0; start < len(segments); {
 		end := start + 1
@@ -62,7 +77,11 @@ func EstimateSegments(segments []Segment, params Params, now time.Time) Estimate
 				reference, mode = global, ReferenceGlobal
 			}
 		}
-		summary := filterBlock(block, reference, params)
+		var mask []bool
+		if excluded != nil {
+			mask = excluded[start:end]
+		}
+		summary := filterBlock(block, reference, params, mask)
 		summary.ReferenceMode = mode
 		result.Blocks = append(result.Blocks, summary)
 		result.Segments += summary.Segments
@@ -95,8 +114,9 @@ func (w window) ratio() float64 {
 // filterBlock removes the segments that windows of suspiciously many points
 // per USD cover. Outside usage raises utilization without cost through the
 // plugin, so it can only raise a window's ratio. A zero reference asks for the
-// block's own iterative average.
-func filterBlock(block []Segment, reference float64, params Params) BlockSummary {
+// block's own iterative average. A non-nil excluded receives each segment's
+// outcome.
+func filterBlock(block []Segment, reference float64, params Params, excluded []bool) BlockSummary {
 	summary := BlockSummary{Start: block[0].Block, End: block[len(block)-1].At, Segments: len(block)}
 	for _, segment := range block {
 		summary.Gain += segment.Gain
@@ -123,6 +143,9 @@ func filterBlock(block []Segment, reference float64, params Params) BlockSummary
 			summary.CleanGain, summary.CleanCost = summary.Gain, summary.Cost
 			if summary.Cost <= 0 {
 				summary.CleanGain, summary.CleanCost, summary.Excluded = 0, 0, len(block)
+				for i := range excluded {
+					excluded[i] = true
+				}
 			}
 			summary.Reference = summary.Ratio()
 			return summary
@@ -147,6 +170,9 @@ func filterBlock(block []Segment, reference float64, params Params) BlockSummary
 	for i, segment := range block {
 		if covering[i] > 0 && float64(suspicious[i]) >= params.ExcludeVoteShare*float64(covering[i])-gainEpsilon {
 			summary.Excluded++
+			if excluded != nil {
+				excluded[i] = true
+			}
 			continue
 		}
 		summary.CleanGain += segment.Gain

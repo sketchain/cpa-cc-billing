@@ -1876,6 +1876,40 @@ def cc_payload():
             "credentials": credentials, "key_options": options, "credential_warning": ""}
 
 
+def cc_trend_payload(auth_index):
+    """Hourly k evidence and segments for the quota trend charts. The demo
+    account has 40 days with gaps and low-precision days; the removed one has
+    a single day, which the page shows as too little data."""
+    pooled = [i for pool in CC_SETTINGS["pools"] for i in pool["auth_indexes"]] + list(CC_SETTINGS["accounts"])
+    if auth_index not in pooled:
+        return None
+    settings = CC_SETTINGS["accounts"].get(auth_index, {})
+    k = settings.get("manual_k") or 6.02
+    rng = random.Random(auth_index)
+    days = 40 if auth_index == "auth-demo-claude" else 1
+    empty_days = {5, 6, 17, 30}
+    low_days = {3, 12, 25, 38}
+    buckets, segments = [], []
+    for day in range(days, 0, -1):
+        if days > 1 and day in empty_days:
+            continue
+        start = (NOW - timedelta(days=day)).replace(hour=0)
+        daily_k = 6 + rng.uniform(-1.2, 1.4)
+        weekly = rng.uniform(0.6, 1.2) if day in low_days else rng.uniform(1.6, 3.2)
+        for hour in range(8, 21):
+            gain_7d = weekly * rng.uniform(0.5, 1.5) / 13 * 10
+            at = start + timedelta(hours=hour)
+            buckets.append({"at": iso(at), "gain_5h": round(gain_7d * daily_k, 3), "gain_7d": round(gain_7d, 3)})
+            excluded = sum(rng.random() < 0.06 for _ in range(2))
+            kept = 2 - excluded if CC_LOADED[0] else 2
+            segments.append({"at": iso(at), "segments": kept, "excluded": 2 - kept, "gain": kept,
+                             "cost_usd": round(sum(rng.uniform(0.38, 0.52) for _ in range(kept)), 4)})
+    return {"trend": {"auth_index": auth_index, "loaded": CC_LOADED[0], "from": iso(NOW - timedelta(days=365)), "at": iso(NOW),
+                      "retention_days": 365, "k_min_weekly_points": CC_SETTINGS["params"]["k_min_weekly_points"], "k": k,
+                      "k_source": "manual" if settings.get("manual_k") else "auto" if CC_LOADED[0] else "tier",
+                      "exclusion": "estimate" if CC_LOADED[0] else "raw", "buckets": buckets, "segment_hours": segments}}
+
+
 def route_rows():
     return [dict(route, credential_labels=credential_labels(route["rule"].get("credential_ids", []) + route["rule"].get("denied_credential_ids", []))) for route in ROUTES]
 
@@ -1883,6 +1917,8 @@ def route_rows():
 def payload_for(path, query):
     if path == f"{API_BASE}/cc":
         return cc_payload()
+    if path == f"{API_BASE}/cc/trend":
+        return cc_trend_payload(query.get("auth_index", [""])[0])
     if path == f"{API_BASE}/keys":
         refresh_route_counts()
         return {"keys": key_rows()}

@@ -1,6 +1,7 @@
 // CC split: Claude account estimates, pools, key assignments and parameters.
 // The page edits a draft of the settings and saves it as a whole.
 const ccQuery = createQuery(m("cc.title"));
+const ccTrendQuery = createQuery(m("cc.trend_title"));
 const ccState = { draft: null, dirty: false, busy: false, openBlocks: new Set() };
 
 const CC_PARAM_FIELDS = [
@@ -23,10 +24,17 @@ pages.admin.cc = {
   autoRefresh: true,
   // Auto refresh would rebuild the inputs being edited; it waits for a save.
   refreshPaused: () => ccState.dirty,
-  queries: [ccQuery],
-  load: (reload) => ccQuery.read("cc", () => plugin("GET", "/cc"), reload),
-  sections: [{ sources: [ccQuery], render: renderCC, displayed: null }],
-  sources: [ccQuery],
+  queries: [ccQuery, ccTrendQuery],
+  load: (reload) => {
+    const tasks = [ccQuery.read("cc", () => plugin("GET", "/cc"), reload).then(() => readCCTrend(reload))];
+    if (typeof Chart !== "function" && (!chartError || reload)) tasks.push(loadCharts());
+    return settleLoads(tasks);
+  },
+  sections: [
+    { sources: [ccQuery], render: renderCC, displayed: null },
+    { sources: [ccQuery, ccTrendQuery], render: renderCCTrend, displayed: null }
+  ],
+  sources: [ccQuery, ccTrendQuery],
   groups: [],
   task: null
 };
@@ -54,6 +62,8 @@ function ccMarkDirty() {
 // A new session must not see the previous one's estimates or unsaved draft.
 function resetCCState() {
   ccQuery.clear();
+  ccTrendQuery.clear();
+  ccDestroyTrendCharts();
   Object.assign(ccState, { draft: null, dirty: false, busy: false });
   ccState.openBlocks.clear();
 }
@@ -188,11 +198,13 @@ function renderCC() {
     ...notices,
     el("p", { id: "cc-dirty", class: "notice err show hidden", text: m("cc.unsaved_changes") }),
     ccAccountsSection(data, draft),
+    el("div", { id: "cc-trend", class: "cc-section" }),
     ccPoolsSection(data, draft),
     ccKeysSection(data, draft),
     ccParamsSection(data, draft),
     ccBlocksSection(data)
   );
+  renderCCTrend();
   updateCCButtons();
 }
 
@@ -731,6 +743,7 @@ async function ccRun(action) {
   try {
     await action();
     await ccQuery.read("cc", () => plugin("GET", "/cc"), true);
+    await readCCTrend(true);
   } finally {
     ccState.busy = false;
     renderCC();

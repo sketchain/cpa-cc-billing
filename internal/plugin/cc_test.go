@@ -533,3 +533,90 @@ func readKeyRows(t *testing.T, app *App) []keyRow {
 	callOK(t, app, http.MethodGet, routeKeys, nil, nil, http.StatusOK, &response)
 	return response.Keys
 }
+
+// ccTables dumps every CC table, so a test can tell whether a call wrote.
+func ccTables(t *testing.T, app *App) string {
+	t.Helper()
+	var dump strings.Builder
+	err := (&ccHost{app: app}).WithDB(func(db *sql.DB) error {
+		for _, query := range []string{
+			`SELECT auth_index, block_at, at, cost_usd, gain FROM cc_segments ORDER BY id`,
+			`SELECT auth_index, bucket_at, gain_5h, gain_7d, '' FROM cc_k_buckets ORDER BY auth_index, bucket_at`,
+			`SELECT auth_index, state_json, '', '', '' FROM cc_streams ORDER BY auth_index`,
+			`SELECT key, value, '', '', '' FROM cc_meta ORDER BY key`,
+		} {
+			rows, err := db.Query(query)
+			if err != nil {
+				return err
+			}
+			for rows.Next() {
+				values := make([]any, 5)
+				pointers := make([]any, 5)
+				for i := range values {
+					pointers[i] = &values[i]
+				}
+				if err := rows.Scan(pointers...); err != nil {
+					rows.Close()
+					return err
+				}
+				fmt.Fprintln(&dump, values...)
+			}
+			rows.Close()
+			fmt.Fprintln(&dump, "--")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dump.String()
+}
+
+func TestCCTrendReadsStoredDataWithoutRefreshing(t *testing.T) {
+	app, clock := newCCTestApp(t)
+	reset5h, reset7d := clock.now.Add(4*time.Hour), clock.now.Add(5*24*time.Hour)
+	for i := range 6 {
+		clock.now = clock.now.Add(5 * time.Minute)
+		ccUsage(t, app, ccRemainderKey, 0.5, float64(i+1)*0.04, float64(i+1)*0.005, reset5h, reset7d)
+	}
+	clock.now = clock.now.Add(ccbilling.ReorderHorizon + time.Minute)
+	callOK(t, app, http.MethodPost, routeCCRefresh, nil, nil, http.StatusOK, nil)
+
+	// Usage after the last refresh stays unprocessed while usage refreshes wait.
+	app.cc.RefreshInterval = 24 * time.Hour
+	clock.now = clock.now.Add(time.Minute)
+	ccUsage(t, app, ccRemainderKey, 0.5, 0.40, 0.04, reset5h, reset7d)
+	clock.now = clock.now.Add(ccbilling.ReorderHorizon + time.Minute)
+	before := ccTables(t, app)
+
+	var response struct {
+		Trend ccbilling.Trend `json:"trend"`
+	}
+	callOK(t, app, http.MethodGet, routeCCTrend, url.Values{"auth_index": {ccAuth}}, nil, http.StatusOK, &response)
+	if after := ccTables(t, app); after != before {
+		t.Fatalf("the trend request changed the CC tables:\nbefore %s\nafter %s", before, after)
+	}
+	trend := response.Trend
+	if trend.AuthIndex != ccAuth || !trend.Loaded || trend.Exclusion != ccbilling.ExclusionEstimate || len(trend.Segments) == 0 ||
+		len(trend.Buckets) == 0 || trend.K == nil || trend.KSource == "" {
+		t.Fatalf("trend = %+v", trend)
+	}
+	var gain7d float64
+	for _, bucket := range trend.Buckets {
+		gain7d += bucket.Gain7d
+	}
+	// Only the refreshed history, not the pending report.
+	if gain7d <= 0 || gain7d >= 4 {
+		t.Fatalf("trend 7-day gain = %v, want only the history processed before the request", gain7d)
+	}
+
+	callOK(t, app, http.MethodGet, routeCCTrend, nil, nil, http.StatusBadRequest, nil)
+	callOK(t, app, http.MethodGet, routeCCTrend, url.Values{"auth_index": {"auth-unknown"}}, nil, http.StatusNotFound, nil)
+	// API key users have no route to it.
+	for _, key := range []string{ccRemainderKey, ""} {
+		resp := callAccount(t, app, routeCCTrend, key, url.Values{"auth_index": {ccAuth}})
+		if resp.StatusCode != http.StatusNotFound || bytes.Contains(resp.Body, []byte("gain_7d")) {
+			t.Fatalf("API key trend = %d %s", resp.StatusCode, resp.Body)
+		}
+	}
+}
