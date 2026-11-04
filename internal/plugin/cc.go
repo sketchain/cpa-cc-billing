@@ -27,6 +27,9 @@ const (
 	routeCCRefresh = "/cc/refresh"
 	routeCCRebuild = "/cc/rebuild"
 	routeCCTrend   = "/cc/trend"
+	routeCCCalib   = "/cc/calibrations"
+	routeCCStop    = "/cc/calibrations/stop"
+	routeCCEstim   = "/cc/estimates"
 	routeBalance   = "/balance"
 	routePriceJSON = "/prices/import"
 	routePanel     = "/panel-settings"
@@ -41,6 +44,10 @@ func init() {
 		managementEndpoint{http.MethodPost, routeCCRefresh, "Process new usage into CC estimates", (*App).ccRefresh},
 		managementEndpoint{http.MethodGet, routeCCTrend, "View a CC account's retained hourly k evidence and 1% segments", (*App).ccTrend},
 		managementEndpoint{http.MethodPost, routeCCRebuild, "Rebuild CC segments from the retained request history", (*App).ccRebuild},
+		managementEndpoint{http.MethodPost, routeCCCalib, "Start calibrating a model's CC quota weight on an account", (*App).ccStartCalibration},
+		managementEndpoint{http.MethodPost, routeCCStop, "End a running CC quota weight calibration", (*App).ccStopCalibration},
+		managementEndpoint{http.MethodDelete, routeCCCalib, "Delete a CC quota weight calibration", (*App).ccDeleteCalibration},
+		managementEndpoint{http.MethodGet, routeCCEstim, "View the CC estimates on the basis in effect", (*App).ccEstimates},
 		managementEndpoint{http.MethodPost, routePriceJSON, "Import custom model prices from a JSON price list", (*App).importPriceList},
 		managementEndpoint{http.MethodGet, routePanel, "View the page display and API key self-service settings", (*App).panelSettings},
 		managementEndpoint{http.MethodPut, routePanel, "Update the page display and API key self-service settings", (*App).putPanelSettings},
@@ -323,7 +330,81 @@ func (a *App) ccView(_ ManagementRequest) ManagementResponse {
 		}
 		keys = append(keys, option)
 	}
-	return JSONResponse(http.StatusOK, map[string]any{"cc": view, "credentials": credentials, "key_options": keys, "credential_warning": warning})
+	var models []string
+	for _, item := range view.Settings.Weights.Items {
+		models = append(models, item.Models...)
+	}
+	prices := map[string]billing.PriceMultiplier{}
+	var priceWarning string
+	if len(models) > 0 {
+		if prices, err = a.store.PriceMultipliers(models); err != nil {
+			prices, priceWarning = map[string]billing.PriceMultiplier{}, err.Error()
+		}
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"cc": view, "credentials": credentials, "key_options": keys, "credential_warning": warning,
+		"price_multipliers": prices, "price_warning": priceWarning})
+}
+
+// ccCalibrationError maps a calibration error to its response.
+func ccCalibrationError(err error) ManagementResponse {
+	switch {
+	case ccbilling.IsInvalid(err):
+		return jsonMessageError(http.StatusBadRequest, "invalid", messages.FromError(err))
+	case ccbilling.IsCalibrationNotFound(err):
+		return JSONError(http.StatusNotFound, "not_found", "The calibration does not exist or has already ended")
+	}
+	return errorResponse(err)
+}
+
+func (a *App) ccStartCalibration(req ManagementRequest) ManagementResponse {
+	var body struct {
+		ItemID    string `json:"item_id"`
+		AuthIndex string `json:"auth_index"`
+	}
+	if err := decodeStrict(req.Body, &body); err != nil {
+		return errorResponse(err)
+	}
+	calibration, err := a.cc.StartCalibration(strings.TrimSpace(body.ItemID), strings.TrimSpace(body.AuthIndex))
+	if err != nil {
+		return ccCalibrationError(err)
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"calibration": calibration})
+}
+
+func (a *App) ccStopCalibration(req ManagementRequest) ManagementResponse {
+	var body struct {
+		ID int64 `json:"id"`
+	}
+	if err := decodeStrict(req.Body, &body); err != nil {
+		return errorResponse(err)
+	}
+	if err := a.cc.StopCalibration(body.ID); err != nil {
+		return ccCalibrationError(err)
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"stopped": true})
+}
+
+func (a *App) ccDeleteCalibration(req ManagementRequest) ManagementResponse {
+	id, err := strconv.ParseInt(strings.TrimSpace(req.Query.Get("id")), 10, 64)
+	if err != nil || id <= 0 {
+		return JSONError(http.StatusBadRequest, "invalid", "id must be a calibration ID")
+	}
+	if err := a.cc.DeleteCalibration(id); err != nil {
+		return ccCalibrationError(err)
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"deleted": true})
+}
+
+// ccEstimates returns the latest estimates on the basis in effect, the same
+// values later features read through the manager. It never refreshes.
+func (a *App) ccEstimates(_ ManagementRequest) ManagementResponse {
+	estimates, ok := a.cc.Estimates()
+	if !ok {
+		response := JSONError(http.StatusServiceUnavailable, "not_ready", "CC estimates are still loading; retry shortly")
+		response.Headers.Set("Retry-After", "60")
+		return response
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"estimates": estimates})
 }
 
 func (a *App) ccPutSettings(req ManagementRequest) ManagementResponse {

@@ -991,5 +991,9 @@
   "cc.trend_tip_usd_per_point": "$/1% (5h): {v0}",
   "cc.trend_tip_weekly_daily": "Projected weekly total: {v0} (daily k)",
   "cc.trend_tip_weekly_rolling": "Projected weekly total: {v0} (rolling k; the daily k is missing or imprecise)",
-  "cc.trend_tip_weekly_none": "Projected weekly total: — (no k or no segment cost)"
+  "cc.trend_tip_weekly_none": "Projected weekly total: — (no k or no segment cost)",
+  "backend.cc_model_value_already_in_item_value": "Model {v0} is already in test item {v1}; a model can belong to only one item",
+  "backend.cc_test_item_value_does_not_exist": "Model test item {v0} does not exist",
+  "backend.cc_account_value_not_configured": "Account {v0} is not configured in the CC split",
+  "backend.cc_account_value_already_calibrating": "Account {v0} is already calibrating; end that calibration first"
 }

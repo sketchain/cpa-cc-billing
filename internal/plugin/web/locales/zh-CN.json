@@ -991,5 +991,9 @@
   "cc.trend_tip_usd_per_point": "$/1%（5h）：{v0}",
   "cc.trend_tip_weekly_daily": "推算周总额：{v0}（用当日 k）",
   "cc.trend_tip_weekly_rolling": "推算周总额：{v0}（用滚动 k，当日 k 缺失或精度不足）",
-  "cc.trend_tip_weekly_none": "推算周总额：—（缺少 k 或段花费）"
+  "cc.trend_tip_weekly_none": "推算周总额：—（缺少 k 或段花费）",
+  "backend.cc_model_value_already_in_item_value": "模型 {v0} 已经在待测项 {v1} 里，一个模型只能属于一个待测项",
+  "backend.cc_test_item_value_does_not_exist": "待测项 {v0} 不存在",
+  "backend.cc_account_value_not_configured": "账号 {v0} 没有配置在 CC 分账里",
+  "backend.cc_account_value_already_calibrating": "账号 {v0} 正在校准，请先结束那次校准"
 }

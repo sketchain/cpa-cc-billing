@@ -42,6 +42,8 @@ type Observation struct {
 type CostEvent struct {
 	At  time.Time
 	USD float64
+	// Model is the request's normalized billing model; "" when unknown.
+	Model string
 }
 
 // Segment is the cost of one rise of the 5-hour utilization, normally 1%, of
@@ -51,6 +53,45 @@ type Segment struct {
 	Block   time.Time `json:"block"`
 	CostUSD float64   `json:"cost_usd"`
 	Gain    float64   `json:"gain"`
+	// Models splits CostUSD by billing model. A segment recorded before the
+	// split existed has none; cost whose model is unknown is under "".
+	Models map[string]float64 `json:"models,omitempty"`
+}
+
+// unknownModel holds the part of a segment's cost whose model is unknown.
+const unknownModel = ""
+
+// Split reports whether the segment's cost is fully attributed to models.
+func (s Segment) Split() bool {
+	if s.CostUSD <= 0 {
+		return true
+	}
+	if len(s.Models) == 0 {
+		return false
+	}
+	_, unknown := s.Models[unknownModel]
+	return !unknown
+}
+
+// splitCosts attributes a segment's accumulated cost to its models; any part
+// the models do not cover, such as cost accumulated before an upgrade, is
+// unknown.
+func splitCosts(total float64, models map[string]float64) map[string]float64 {
+	if total <= 0 {
+		return nil
+	}
+	split := make(map[string]float64, len(models)+1)
+	covered := 0.0
+	for model, cost := range models {
+		if cost > 0 {
+			split[model] += cost
+			covered += cost
+		}
+	}
+	if rest := total - covered; rest > 1e-9*max(1, total) {
+		split[unknownModel] += rest
+	}
+	return split
 }
 
 // windowTrack follows the current period of one quota window.
@@ -128,19 +169,22 @@ type StreamState struct {
 	// covers an unknown fraction of a point and is discarded.
 	Armed   bool    `json:"armed"`
 	AccCost float64 `json:"acc_cost"`
+	// AccModels splits AccCost by model.
+	AccModels map[string]float64 `json:"acc_models,omitempty"`
 	// K follows the same reports for k evidence with its own cursor, so k can
 	// be rebuilt from history without touching the segments.
 	K KStream `json:"k"`
 }
 
 func (s *StreamState) breakBlock() {
-	s.BlockStart, s.Armed, s.AccCost = time.Time{}, false, 0
+	s.BlockStart, s.Armed, s.AccCost, s.AccModels = time.Time{}, false, 0, nil
 }
 
 type streamEvent struct {
-	at   time.Time
-	obs  *Observation
-	cost float64
+	at    time.Time
+	obs   *Observation
+	cost  float64
+	model string
 }
 
 // Advance consumes the observations and costs that happened after the cursor
@@ -154,7 +198,7 @@ func (s *StreamState) Advance(observations []Observation, costs []CostEvent, unt
 	}
 	for _, cost := range costs {
 		if cost.At.After(s.Cursor) && !cost.At.After(until) {
-			events = append(events, streamEvent{at: cost.At, cost: cost.USD})
+			events = append(events, streamEvent{at: cost.At, cost: cost.USD, model: cost.Model})
 		}
 	}
 	// A report precedes a cost at the same instant: it was evaluated before
@@ -180,6 +224,10 @@ func (s *StreamState) Advance(observations []Observation, costs []CostEvent, unt
 		if event.obs == nil {
 			if s.Armed && finite(event.cost) && event.cost > 0 {
 				s.AccCost += event.cost
+				if s.AccModels == nil {
+					s.AccModels = map[string]float64{}
+				}
+				s.AccModels[event.model] += event.cost
 			}
 			continue
 		}
@@ -198,9 +246,10 @@ func (s *StreamState) Advance(observations []Observation, costs []CostEvent, unt
 		case stepSame:
 			if delta5 > gainEpsilon {
 				if s.Armed {
-					segments = append(segments, Segment{At: event.at, Block: s.BlockStart, CostUSD: s.AccCost, Gain: roundGain(delta5)})
+					segments = append(segments, Segment{At: event.at, Block: s.BlockStart, CostUSD: s.AccCost, Gain: roundGain(delta5),
+						Models: splitCosts(s.AccCost, s.AccModels)})
 				}
-				s.Armed, s.AccCost = true, 0
+				s.Armed, s.AccCost, s.AccModels = true, 0, nil
 			}
 		}
 	}

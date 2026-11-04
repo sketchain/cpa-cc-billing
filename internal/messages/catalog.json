@@ -668,5 +668,30 @@
   "The account is not configured in the CC split": {
     "key": "backend.the_account_is_not_configured_in_the_cc_split",
     "formats": []
+  },
+  "Model %q is already in test item %q; a model can belong to only one item": {
+    "key": "backend.cc_model_value_already_in_item_value",
+    "formats": [
+      "%q",
+      "%q"
+    ]
+  },
+  "Model test item %q does not exist": {
+    "key": "backend.cc_test_item_value_does_not_exist",
+    "formats": [
+      "%q"
+    ]
+  },
+  "Account %q is not configured in the CC split": {
+    "key": "backend.cc_account_value_not_configured",
+    "formats": [
+      "%q"
+    ]
+  },
+  "Account %q is already calibrating; end that calibration first": {
+    "key": "backend.cc_account_value_already_calibrating",
+    "formats": [
+      "%q"
+    ]
   }
 }

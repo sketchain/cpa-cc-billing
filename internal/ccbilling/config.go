@@ -107,6 +107,7 @@ type Settings struct {
 	Pools    []Pool                     `json:"pools"`
 	Accounts map[string]AccountSettings `json:"accounts"`
 	Keys     map[string]KeySettings     `json:"keys"`
+	Weights  WeightSettings             `json:"weights"`
 }
 
 // DefaultParams returns the documented defaults.
@@ -131,7 +132,8 @@ func DefaultParams() Params {
 }
 
 func DefaultSettings() Settings {
-	return Settings{Params: DefaultParams(), Pools: []Pool{}, Accounts: map[string]AccountSettings{}, Keys: map[string]KeySettings{}}
+	return Settings{Params: DefaultParams(), Pools: []Pool{}, Accounts: map[string]AccountSettings{}, Keys: map[string]KeySettings{},
+		Weights: DefaultWeightSettings()}
 }
 
 func (p Params) gap() time.Duration { return time.Duration(p.BlockGapMinutes * float64(time.Minute)) }
@@ -216,8 +218,12 @@ func (s Settings) Normalized() (Settings, error) {
 	if err := s.Params.validate(); err != nil {
 		return Settings{}, err
 	}
+	weights, err := s.Weights.normalized()
+	if err != nil {
+		return Settings{}, err
+	}
 	out := Settings{Params: s.Params, Pools: make([]Pool, 0, len(s.Pools)),
-		Accounts: make(map[string]AccountSettings, len(s.Accounts)), Keys: make(map[string]KeySettings, len(s.Keys))}
+		Accounts: make(map[string]AccountSettings, len(s.Accounts)), Keys: make(map[string]KeySettings, len(s.Keys)), Weights: weights}
 	out.Params.TierWeeklyUSD = maps.Clone(s.Params.TierWeeklyUSD)
 	out.Params.TierK = maps.Clone(s.Params.TierK)
 	ids := map[string]bool{}
