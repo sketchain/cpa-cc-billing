@@ -92,6 +92,15 @@ The plugin switches the 7-day window of a fixed key's plan to a shared cycle anc
 
 Everything is set on the **CC split** page and stored in the database: segment retention (365 days, independent of request events), block gap (5 minutes), window width (8%), reference (global), suspicious threshold (20%), exclusion vote (50%), weight exponent p (2), recent period and share (14 days, 90%), weekly gain for k (10 points), cold start blocks (20), tier defaults ($250 / $1250 / $2500), tier default k (8 each), refusing remainder keys while estimates are not loaded (on), safety factor (90%), each account's tier and manual k, each pool's accounts and anchor, and each key's type, pool, 5-hour share override or weekly cap. Fixed keys that share a plan must be in the same pool.
 
+### Quota trend
+
+The CC split page draws two daily charts for each pooled account, splitting days in the browser's time zone:
+
+- Daily k: the day's k = its summed 5-hour gain / summed weekly gain (no k on a day without weekly gain), the rolling 7-day k (fewer days at the start), and a reference line for the effective k labelled auto, manual or tier default. Days whose weekly gain is below **k needs 7-day gain** (`k_min_weekly_points`) show as hollow points: their k is imprecise.
+- Daily gains and projected weekly total: bars of the day's 5-hour and weekly gains, with the projected weekly total = k × $/1% × 100 on the right axis. $/1% is the cost over the gain of the day's segments, using only the segments the estimate kept; while the estimates are not loaded, no exclusion result exists and every stored segment counts. When the day's k is missing or imprecise the rolling k is used (diamond points).
+
+Hovering shows the day's two gains, segments, cost, daily k, rolling k, $/1% and projected weekly total; the range switches between 7, 14 and 30 days and the whole retention. The charts read the stored hourly k evidence and 1% segments only: opening them never refreshes the estimates or writes to the database, and API key users do not see them.
+
 ### Auth files page
 
 For Claude accounts in a CC pool, the auth files page (with **Quota estimate** on) and its detail drawer show the CC split's result instead of the estimate scaled by usage × 100 / used percent: the 5-hour and weekly totals, k with its source (auto, manual or tier default), R week / R 5h and the cold start state. They come from the latest estimate snapshot; opening the page does not refresh the estimates. Other accounts are unchanged.
