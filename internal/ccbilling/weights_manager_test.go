@@ -233,7 +233,7 @@ func TestSchemaMigrationIsRepeatable(t *testing.T) {
 		}
 	}
 	var version string
-	if err := host.db.QueryRow(`SELECT value FROM cc_meta WHERE key = 'schema_version'`).Scan(&version); err != nil || version != "3" {
+	if err := host.db.QueryRow(`SELECT value FROM cc_meta WHERE key = 'schema_version'`).Scan(&version); err != nil || version != "4" {
 		t.Fatalf("version = %q, %v", version, err)
 	}
 }

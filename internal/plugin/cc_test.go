@@ -544,6 +544,9 @@ func ccTables(t *testing.T, app *App) string {
 			`SELECT auth_index, bucket_at, gain_5h, gain_7d, '' FROM cc_k_buckets ORDER BY auth_index, bucket_at`,
 			`SELECT auth_index, state_json, '', '', '' FROM cc_streams ORDER BY auth_index`,
 			`SELECT key, value, '', '', '' FROM cc_meta ORDER BY key`,
+			`SELECT segment_id, model, cost_usd, '', '' FROM cc_segment_costs ORDER BY segment_id, model`,
+			`SELECT id, item_json, auth_index, started_at, ended_at || result_json FROM cc_calibrations ORDER BY id`,
+			`SELECT scope, hour_at, reason, count, '' FROM cc_block_counts ORDER BY scope, hour_at, reason`,
 		} {
 			rows, err := db.Query(query)
 			if err != nil {

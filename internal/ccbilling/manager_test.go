@@ -51,7 +51,7 @@ func newFakeHost(t *testing.T) *fakeHost {
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 	if _, err := db.Exec(`
-		CREATE TABLE request_events (id INTEGER PRIMARY KEY, at INTEGER, auth_index TEXT, latency_ms INTEGER, total_cost REAL, currency TEXT,
+		CREATE TABLE request_events (id INTEGER PRIMARY KEY, at INTEGER, scope TEXT NOT NULL DEFAULT '', auth_index TEXT, latency_ms INTEGER, total_cost REAL, currency TEXT,
 			billing_model TEXT NOT NULL DEFAULT '', upstream_model TEXT NOT NULL DEFAULT '');
 		CREATE TABLE quota_report_windows (request_event_id INTEGER, limit_key TEXT, seconds INTEGER, auth_index TEXT, provider TEXT,
 			at INTEGER, used_percent REAL, reset_at INTEGER);`); err != nil {

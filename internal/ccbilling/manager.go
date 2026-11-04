@@ -159,6 +159,11 @@ type Manager struct {
 
 	panel atomic.Pointer[PanelSettings]
 
+	// blockMu guards the refusal counts not yet saved.
+	blockMu       sync.Mutex
+	blocks        map[blockKey]int64
+	blocksDropped int64
+
 	lastError      atomic.Value
 	loggedUnloaded atomic.Bool
 
@@ -241,6 +246,11 @@ func (m *Manager) MaybeRefresh() {
 	}
 	defer m.refreshMu.Unlock()
 	if m.snap.Load() != nil && m.host.Now().Sub(m.lastRefresh) < m.RefreshInterval {
+		if m.pendingBlocks() {
+			if err := m.withDB(m.flushBlocksLocked); err != nil {
+				m.recordError(err)
+			}
+		}
 		return
 	}
 	_ = m.refreshLocked()
@@ -379,6 +389,10 @@ func (m *Manager) refreshLocked() error {
 	accounts := map[string]accountSnapshot{}
 	var weights weightsSnapshot
 	err := m.withDB(func(db *sql.DB) error {
+		if err := m.flushBlocksLocked(db); err != nil {
+			// Counts stay pending; the estimates must not wait for them.
+			m.recordError(err)
+		}
 		params := m.settings.Params
 		cutoff := now.Add(-params.retention())
 		if m.lastPrune.IsZero() || now.Sub(m.lastPrune) > time.Hour {
