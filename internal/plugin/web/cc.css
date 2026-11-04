@@ -48,6 +48,10 @@
 .cc-pool-account.muted .cc-check { cursor: not-allowed; }
 .cc-param-toggle { margin-top: 14px; }
 .cc-param-toggle > p.muted { margin: 4px 0 0; }
+/* Parameter switches wrap their label instead of widening the page on narrow screens. */
+.cc-param-switch { align-items: flex-start; max-width: 100%; padding-top: 6px; padding-bottom: 6px; white-space: normal; }
+.cc-param-switch > .switch-control { margin-top: 2px; }
+.cc-param-switch > span:last-child { min-width: 0; overflow-wrap: anywhere; }
 .cc-stale { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .reset-confirmation { display: grid; gap: 10px; white-space: normal; }
 .cc-trend-toolbar {
@@ -96,7 +100,6 @@
   .cc-calibration-controls > * { flex: 1 1 100%; }
   .cc-calibration-controls .native-select, .cc-calibration-controls select { width: 100%; }
 }
-.cc-param-switch { max-width: 100%; padding-top: 4px; padding-bottom: 4px; white-space: normal; }
 .cc-forecast-windows { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
 .cc-forecast-window { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
 .cc-forecast-input { width: 76px; }
