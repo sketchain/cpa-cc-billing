@@ -2,6 +2,8 @@
 // The page edits a draft of the settings and saves it as a whole.
 const ccQuery = createQuery(m("cc.title"));
 const ccTrendQuery = createQuery(m("cc.trend_title"));
+const ccForecastQuery = createQuery(m("cc.forecast_title"));
+const ccUsageQuery = createQuery(m("cc.usage_title"));
 const ccState = { draft: null, dirty: false, busy: false, openBlocks: new Set() };
 
 const CC_PARAM_FIELDS = [
@@ -22,22 +24,28 @@ const CC_TIERS = ["pro", "max5x", "max20x"];
 
 pages.admin.cc = {
   autoRefresh: true,
-  // Auto refresh would rebuild the inputs being edited; it waits for a save.
-  refreshPaused: () => ccState.dirty,
-  queries: [ccQuery, ccTrendQuery],
+  // Auto refresh would rebuild the inputs being edited; it waits for a save,
+  // and while a simulation or forecast input has focus.
+  refreshPaused: () => ccState.dirty || !!document.activeElement?.closest?.("#cc-sim, #cc-forecast"),
+  queries: [ccQuery, ccTrendQuery, ccForecastQuery, ccUsageQuery],
   load: (reload) => {
-    const tasks = [ccQuery.read("cc", () => plugin("GET", "/cc"), reload).then(() => readCCTrend(reload))];
+    const tasks = [ccQuery.read("cc", () => plugin("GET", "/cc"), reload).then(() => ccReadInsights(reload))];
     if (typeof Chart !== "function" && (!chartError || reload)) tasks.push(loadCharts());
     return settleLoads(tasks);
   },
   sections: [
     { sources: [ccQuery], render: renderCC, displayed: null },
-    { sources: [ccQuery, ccTrendQuery], render: renderCCTrend, displayed: null }
+    { sources: [ccQuery, ccTrendQuery], render: renderCCTrend, displayed: null },
+    { sources: [ccQuery, ccForecastQuery], render: renderCCForecast, displayed: null },
+    { sources: [ccQuery, ccUsageQuery], render: renderCCUsage, displayed: null }
   ],
-  sources: [ccQuery, ccTrendQuery],
+  sources: [ccQuery, ccTrendQuery, ccForecastQuery, ccUsageQuery],
   groups: [],
   task: null
 };
+
+// The trend, forecast and key usage read after the CC view, independently.
+function ccReadInsights(reload) { return settleLoads([readCCTrend(reload), readCCForecast(reload), readCCUsage(reload)]); }
 
 function ccUSD(value) {
   return Number.isFinite(value)
@@ -63,7 +71,11 @@ function ccMarkDirty() {
 function resetCCState() {
   ccQuery.clear();
   ccTrendQuery.clear();
+  ccForecastQuery.clear();
+  ccUsageQuery.clear();
   ccDestroyTrendCharts();
+  ccDestroyUsageCharts();
+  resetCCSim();
   Object.assign(ccState, { draft: null, dirty: false, busy: false });
   ccState.openBlocks.clear();
 }
@@ -198,14 +210,20 @@ function renderCC() {
     ...notices,
     el("p", { id: "cc-dirty", class: "notice err show hidden", text: m("cc.unsaved_changes") }),
     ccAccountsSection(data, draft),
+    el("div", { id: "cc-forecast", class: "cc-section" }),
     el("div", { id: "cc-trend", class: "cc-section" }),
+    el("div", { id: "cc-usage", class: "cc-section" }),
     ccWeightsSection(data, draft),
     ccPoolsSection(data, draft),
     ccKeysSection(data, draft),
+    el("div", { id: "cc-sim", class: "cc-section" }),
     ccParamsSection(data, draft),
     ccBlocksSection(data)
   );
+  renderCCForecast();
   renderCCTrend();
+  renderCCUsage();
+  renderCCSim();
   updateCCButtons();
 }
 
@@ -744,7 +762,7 @@ async function ccRun(action) {
   try {
     await action();
     await ccQuery.read("cc", () => plugin("GET", "/cc"), true);
-    await readCCTrend(true);
+    await ccReadInsights(true);
   } finally {
     ccState.busy = false;
     renderCC();
