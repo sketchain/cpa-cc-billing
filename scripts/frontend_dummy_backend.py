@@ -1796,6 +1796,66 @@ CC_SETTINGS = {
              LIVE_KEYS[1]["scope"]: {"kind": "remainder", "pool_id": "pool-1", "weekly_cap_usd": 300},
              # A key deleted from CLIProxyAPI that the settings still list.
              "f" * 64: {"kind": "remainder", "pool_id": "pool-2"}},
+    "weights": {"enabled": False, "min_segments": 30, "min_cost_usd": 20, "min_share_spread": 0.05,
+                "items": [{"id": "item-1", "name": "Fable", "models": ["claude-fable-20260801", "claude-fable-20261001"]},
+                          {"id": "item-2", "name": "Haiku", "models": ["claude-haiku-4-5"], "manual_multiplier": 0.6}]},
+}
+CC_CALIBRATIONS = [
+    {"id": 2, "item": {"id": "item-1", "name": "Fable", "models": ["claude-fable-20260801", "claude-fable-20261001"]},
+     "auth_index": "auth-demo-claude", "started_at": iso(NOW - timedelta(hours=3)), "final": False,
+     "result": {"status": "running", "item_segments": 6, "item_gain": 6, "item_cost_usd": 0.6, "item_usd_per_point": 0.1,
+                "base_segments": 0, "base_gain": 0, "base_cost_usd": 0, "base_from": "period", "excluded_segments": 2, "unsplit_segments": 0}},
+    {"id": 1, "item": {"id": "item-1", "name": "Fable", "models": ["claude-fable-20261001"]}, "auth_index": "auth-demo-claude",
+     "started_at": iso(NOW - timedelta(days=3, hours=4)), "ended_at": iso(NOW - timedelta(days=3, hours=2)), "final": True,
+     "result": {"status": "ok", "multiplier": 3.92, "std_err": 0.21, "low": 3.51, "high": 4.33, "item_segments": 48, "item_gain": 52,
+                "item_cost_usd": 5.6, "item_usd_per_point": 0.1077, "base_segments": 31, "base_gain": 31, "base_cost_usd": 13.1,
+                "base_usd_per_point": 0.4226, "base_from": "recent", "excluded_segments": 7, "unsplit_segments": 1}},
+]
+
+
+def cc_weights_view(accounts):
+    weights = CC_SETTINGS.get("weights") or {"items": []}
+    usage = [("claude-sonnet-4-5", 812.4, 2310), ("claude-opus-4-5", 402.1, 1104), ("claude-fable-20261001", 188.6, 640),
+             ("claude-fable-20260801", 21.3, 77), ("claude-haiku-4-5", 9.8, 41), ("", 66.0, 180)]
+    total = sum(cost for _, cost, _ in usage)
+    owner = {model: item["id"] for item in weights["items"] for model in item["models"]}
+    models = [{"model": model, "cost_usd": cost, "share": cost / total, "segments": count, **({"item_id": owner[model]} if model in owner else {})}
+              for model, cost, count in usage]
+    statuses = {"item-1": {"status": "ok", "multiplier": 4.08, "std_err": 0.17, "low": 3.75, "high": 4.41, "segments": 717,
+                           "cost_usd": 209.9, "share": 0.14, "share_min": 0.0, "share_max": 0.86, "share_spread": 0.19, "vif": 3.2},
+                "item-2": {"status": "collinear", "segments": 41, "cost_usd": 9.8, "share": 0.007, "share_min": 0.004,
+                           "share_max": 0.012, "share_spread": 0.002}}
+    estimate_items, effective = [], []
+    for item in weights["items"]:
+        estimate = {"id": item["id"], **statuses.get(item["id"], {"status": "insufficient", "segments": 0, "cost_usd": 0, "share": 0,
+                                                                 "share_min": 0, "share_max": 0, "share_spread": 0})}
+        estimate_items.append(estimate)
+        weight = {"id": item["id"], "name": item.get("name", ""), "models": item["models"], "multiplier": 1, "source": "default",
+                  "status": estimate["status"]}
+        if item.get("manual_multiplier") is not None:
+            weight.update(multiplier=item["manual_multiplier"], source="manual")
+        elif item["id"] == "item-1":
+            weight.update(multiplier=3.92, source="calibration", calibration_id=1)
+        elif estimate["status"] == "ok":
+            weight.update(multiplier=estimate["multiplier"], source="estimated")
+        effective.append(weight)
+    comparison = [{"auth_index": account["auth_index"],
+                   "raw": {"ratio": 2.21, "usd_per_point": 0.4525, "five_hour_usd": 45.2, "weekly_usd": 272.1, "totals_from": "estimated",
+                           "segments": 1180, "excluded_segments": 174, "clean_blocks": 28},
+                   "weighted": {"ratio": 2.48, "usd_per_point": 0.4032, "five_hour_usd": 40.3, "weekly_usd": 242.6,
+                                "totals_from": "estimated", "segments": 1180, "excluded_segments": 61, "clean_blocks": 31}}
+                  for account in accounts]
+    return {"basis": "weighted" if weights.get("enabled") else "raw",
+            "estimate": {"items": estimate_items, "chunks": 412, "segments": 3980, "excluded_segments": 211, "unsplit_segments": 180,
+                         "iterations": 3, "converged": True},
+            "effective": effective, "calibrations": CC_CALIBRATIONS, "models": models, "comparison": comparison,
+            "unsplit_segments": 180, "segments": 4352}
+
+
+CC_PRICE_MULTIPLIERS = {
+    "claude-fable-20261001": {"model": "claude-fable-20261001", "custom": True, "input": 2, "output": 2, "official_source": "reference"},
+    "claude-fable-20260801": {"model": "claude-fable-20260801", "custom": True, "input": 2, "output": 2, "official_source": "reference"},
+    "claude-haiku-4-5": {"model": "claude-haiku-4-5", "custom": False, "input": 1, "output": 1, "official_source": ""},
 }
 
 
@@ -1868,12 +1928,15 @@ def cc_payload():
     options = [{"scope": key["scope"], "preview": key["preview"], "label": key["label"], "plan_name": key.get("plan_name", ""),
                 "has_weekly_window": True} for key in LIVE_KEYS]
     if not CC_LOADED[0]:
+        empty = {"basis": "raw", "estimate": {"items": []}, "effective": [], "calibrations": [], "models": [], "comparison": [],
+                 "unsplit_segments": 0, "segments": 0}
         return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "accounts": [], "pools": [], "keys": [],
-                       "stored_segments": 0, "at": iso(NOW), "loaded": False, "error": "database is locked"},
-                "credentials": credentials, "key_options": options, "credential_warning": ""}
+                       "stored_segments": 0, "weights": empty, "at": iso(NOW), "loaded": False, "error": "database is locked"},
+                "credentials": credentials, "key_options": options, "credential_warning": "", "price_multipliers": {}, "price_warning": ""}
     return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "accounts": accounts, "pools": pools, "keys": keys,
-                   "stored_segments": 1180, "at": iso(NOW), "loaded": True},
-            "credentials": credentials, "key_options": options, "credential_warning": ""}
+                   "stored_segments": 1180, "weights": cc_weights_view(accounts), "at": iso(NOW), "loaded": True},
+            "credentials": credentials, "key_options": options, "credential_warning": "", "price_multipliers": CC_PRICE_MULTIPLIERS,
+            "price_warning": ""}
 
 
 def cc_trend_payload(auth_index):
@@ -2242,6 +2305,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"settings": CC_SETTINGS})
         elif route in {("POST", f"{API_BASE}/cc/refresh"), ("POST", f"{API_BASE}/cc/rebuild")}:
             self.send_json(200, {"refreshed": True})
+        elif route == ("POST", f"{API_BASE}/cc/calibrations"):
+            body = json.loads(request_body or b"{}")
+            item = next((item for item in CC_SETTINGS.get("weights", {}).get("items", []) if item["id"] == body.get("item_id")), None)
+            if item is None or any(c["auth_index"] == body.get("auth_index") and not c.get("ended_at") for c in CC_CALIBRATIONS):
+                self.send_json(400, {"error": {"code": "invalid", "message": "Invalid calibration"}})
+                return
+            calibration = {"id": max([c["id"] for c in CC_CALIBRATIONS] + [0]) + 1, "item": item, "auth_index": body.get("auth_index"),
+                           "started_at": iso(NOW), "final": False,
+                           "result": {"status": "running", "item_segments": 0, "item_gain": 0, "item_cost_usd": 0, "base_segments": 0,
+                                      "base_gain": 0, "base_cost_usd": 0, "base_from": "period", "excluded_segments": 0, "unsplit_segments": 0}}
+            CC_CALIBRATIONS.insert(0, calibration)
+            self.send_json(200, {"calibration": calibration})
+        elif route == ("POST", f"{API_BASE}/cc/calibrations/stop"):
+            body = json.loads(request_body or b"{}")
+            for calibration in CC_CALIBRATIONS:
+                if calibration["id"] == body.get("id") and not calibration.get("ended_at"):
+                    calibration["ended_at"] = iso(NOW)
+                    calibration["result"]["status"] = "insufficient"
+            self.send_json(200, {"stopped": True})
         elif route == ("POST", f"{API_BASE}/prices/import"):
             body = json.loads(request_body or b"[]")
             entries = body if isinstance(body, list) else body.get("models", [])
@@ -2325,6 +2407,10 @@ class Handler(BaseHTTPRequestHandler):
             row.update(body)
             row["source"] = "custom"
             self.send_json(200, {"price": row})
+        elif route == ("DELETE", f"{API_BASE}/cc/calibrations"):
+            target = parse_qs(parsed.query).get("id", [""])[0]
+            CC_CALIBRATIONS[:] = [c for c in CC_CALIBRATIONS if str(c["id"]) != target]
+            self.send_json(200, {"deleted": True})
         elif route == ("DELETE", f"{API_BASE}/prices"):
             model = parse_qs(parsed.query).get("model_id", [""])[0]
             row = next((price for price in PRICES if price["model_id"] == model), None)
