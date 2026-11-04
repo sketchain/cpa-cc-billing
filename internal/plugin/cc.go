@@ -614,6 +614,8 @@ type ccBlockLog struct {
 // window, with the estimate that decided it.
 func (a *App) ccReportBlock(scope string, decision ccbilling.Decision) {
 	now := a.store.Now()
+	// Every refusal is counted, in memory; only the log line is deduplicated.
+	a.cc.RecordBlock(scope, decision.Reason, now)
 	signature := scope + "\x00" + decision.Reason + "\x00" + decision.RetryAt.UTC().Format(time.RFC3339)
 	if decision.Reason == ccbilling.RefusedNotLoaded {
 		// Its retry time moves with every request; one line per load is enough.

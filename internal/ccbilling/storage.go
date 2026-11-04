@@ -13,7 +13,7 @@ import (
 // versioned separately in cc_meta, so the billing schema version and its
 // migrations stay exactly those of upstream cpa-key-billing: a database copied
 // from cpa-key-billing opens unchanged and gains these tables on first use.
-const ccSchemaVersion = 3
+const ccSchemaVersion = 4
 
 var ccMigrations = []string{
 	// Version 1.
@@ -57,6 +57,15 @@ var ccMigrations = []string{
 		ended_at    INTEGER NOT NULL DEFAULT 0,
 		result_json TEXT    NOT NULL DEFAULT ''
 	);`,
+	// Version 4: remainder keys' CC refusals counted by key, hour and reason.
+	`CREATE TABLE IF NOT EXISTS cc_block_counts (
+		scope   TEXT    NOT NULL,
+		hour_at INTEGER NOT NULL,
+		reason  TEXT    NOT NULL,
+		count   INTEGER NOT NULL,
+		PRIMARY KEY (scope, hour_at, reason)
+	) WITHOUT ROWID;
+	CREATE INDEX IF NOT EXISTS cc_block_counts_hour ON cc_block_counts(hour_at);`,
 }
 
 const (
@@ -284,6 +293,9 @@ func pruneSegments(db *sql.DB, before time.Time) error {
 		}
 		if _, err := tx.Exec(`DELETE FROM cc_segments WHERE at < ?; DELETE FROM cc_k_buckets WHERE bucket_at < ?`, nanos(before), nanos(before)); err != nil {
 			return fmt.Errorf("Prune CC segments: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM cc_block_counts WHERE hour_at < ?`, nanos(before)); err != nil {
+			return fmt.Errorf("Prune CC refusal counts: %w", err)
 		}
 		return nil
 	})
