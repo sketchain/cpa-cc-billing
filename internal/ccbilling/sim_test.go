@@ -29,6 +29,8 @@ type pendingCost struct {
 	at   time.Time
 	usd  float64
 	pure bool // outside usage: raises utilization, no plugin cost
+	// weight scales the quota the cost uses; zero means 1.
+	weight float64
 }
 
 func newSimulation(seed int64, fiveHour, k float64) *simulation {
@@ -43,8 +45,12 @@ func (s *simulation) applyUntil(at time.Time) {
 		p := s.pending[0]
 		s.pending = s.pending[1:]
 		s.rollWindows(p.at)
-		s.used5 += p.usd / s.fiveHour * 100
-		s.used7 += p.usd / (s.fiveHour * s.k) * 100
+		quota := p.usd
+		if p.weight > 0 {
+			quota *= p.weight
+		}
+		s.used5 += quota / s.fiveHour * 100
+		s.used7 += quota / (s.fiveHour * s.k) * 100
 		if p.pure {
 			s.outside += p.usd / s.fiveHour * 100
 		}
@@ -63,6 +69,11 @@ func (s *simulation) rollWindows(at time.Time) {
 
 // request starts a plugin request at at that costs usd and lasts latency.
 func (s *simulation) request(at time.Time, usd float64, latency time.Duration) {
+	s.requestModel(at, usd, latency, "", 1)
+}
+
+// requestModel is a request of model, whose cost uses weight times the quota.
+func (s *simulation) requestModel(at time.Time, usd float64, latency time.Duration, model string, weight float64) {
 	s.applyUntil(at)
 	if s.reset5.IsZero() {
 		s.reset5 = at.Add(FiveHours).Truncate(time.Second)
@@ -72,8 +83,8 @@ func (s *simulation) request(at time.Time, usd float64, latency time.Duration) {
 	}
 	s.obs = append(s.obs, Observation{At: at, Has5h: true, Used5h: math.Floor(s.used5), Reset5h: s.reset5,
 		Has7d: true, Used7d: math.Floor(s.used7), Reset7d: s.reset7})
-	s.pending = append(s.pending, pendingCost{at: at.Add(latency), usd: usd})
-	s.costs = append(s.costs, CostEvent{At: at.Add(latency), USD: usd})
+	s.pending = append(s.pending, pendingCost{at: at.Add(latency), usd: usd, weight: weight})
+	s.costs = append(s.costs, CostEvent{At: at.Add(latency), USD: usd, Model: model})
 }
 
 // outsideUsage spends usd outside the plugin at at.

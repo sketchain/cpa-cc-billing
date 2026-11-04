@@ -199,6 +199,7 @@ function renderCC() {
     el("p", { id: "cc-dirty", class: "notice err show hidden", text: m("cc.unsaved_changes") }),
     ccAccountsSection(data, draft),
     el("div", { id: "cc-trend", class: "cc-section" }),
+    ccWeightsSection(data, draft),
     ccPoolsSection(data, draft),
     ccKeysSection(data, draft),
     ccParamsSection(data, draft),

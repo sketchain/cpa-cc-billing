@@ -249,3 +249,79 @@ func ModelWithoutThinkingSuffix(model string) string {
 func NormalizeModelID(id string) string {
 	return strings.ToLower(strings.TrimSpace(id))
 }
+
+// PriceMultiplier compares a model's custom price with its official price,
+// the built-in or reference price the model would have without it.
+type PriceMultiplier struct {
+	Model string `json:"model"`
+	// Custom is false when the model has no custom price: it is billed at
+	// its official price, a multiplier of 1.
+	Custom bool `json:"custom"`
+	// Input and Output are the custom rates over the official ones, in USD;
+	// zero when no official price is known.
+	Input  float64 `json:"input"`
+	Output float64 `json:"output"`
+	// Official is where the official price comes from.
+	Official PriceSource `json:"official_source"`
+}
+
+// PriceMultipliers compares each model's custom price with its official
+// price. It reads the price table only and never downloads prices.
+func (s *Store) PriceMultipliers(models []string) (map[string]PriceMultiplier, error) {
+	var custom map[string]CustomPrice
+	var references *referencePriceManager
+	rate := s.Config().CNYPerUSD
+	s.read(func(state *State) {
+		custom = maps.Clone(state.Prices)
+		references = s.referencePrices.Load()
+	})
+	if rate <= 0 {
+		rate = DefaultExchangeRate
+	}
+	result := make(map[string]PriceMultiplier, len(models))
+	missing := []string{}
+	official := map[string]Price{}
+	for _, model := range models {
+		multiplier := PriceMultiplier{Model: model, Input: 1, Output: 1, Official: PriceSourceNone}
+		if _, found := custom[NormalizeModelID(model)]; !found {
+			result[model] = multiplier
+			continue
+		}
+		multiplier.Custom, multiplier.Input, multiplier.Output = true, 0, 0
+		if builtin := ResolveBuiltinPrice(model); builtin.Source != PriceSourceNone {
+			official[model] = builtin
+		} else {
+			missing = append(missing, model)
+		}
+		result[model] = multiplier
+	}
+	if len(missing) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		matched, err := references.lookupModels(ctx, missing)
+		if err != nil {
+			return nil, err
+		}
+		for model, price := range matched {
+			if price.PriceRates != nil {
+				official[model] = price.PriceRates.resolve(PriceSourceReference, USD)
+			}
+		}
+	}
+	for model, multiplier := range result {
+		price, ok := official[model]
+		if !multiplier.Custom || !ok {
+			continue
+		}
+		rates := custom[NormalizeModelID(model)]
+		multiplier.Official = price.Source
+		if price.InputPer1M > 0 {
+			multiplier.Input = rate.Convert(rates.InputPer1M, rates.Currency, USD) / price.InputPer1M
+		}
+		if price.OutputPer1M > 0 {
+			multiplier.Output = rate.Convert(rates.OutputPer1M, rates.Currency, USD) / price.OutputPer1M
+		}
+		result[model] = multiplier
+	}
+	return result, nil
+}

@@ -38,11 +38,14 @@ type Trend struct {
 	RetentionDays    int     `json:"retention_days"`
 	KMinWeeklyPoints float64 `json:"k_min_weekly_points"`
 	// K is the account's effective k and KSource where it comes from.
-	K         *float64    `json:"k,omitempty"`
-	KSource   string      `json:"k_source"`
-	Exclusion string      `json:"exclusion"`
-	Buckets   []KBucket   `json:"buckets"`
-	Segments  []TrendHour `json:"segment_hours"`
+	K         *float64 `json:"k,omitempty"`
+	KSource   string   `json:"k_source"`
+	Exclusion string   `json:"exclusion"`
+	// Basis is the estimate's basis; on the weighted basis segment costs
+	// are in baseline USD.
+	Basis    string      `json:"basis"`
+	Buckets  []KBucket   `json:"buckets"`
+	Segments []TrendHour `json:"segment_hours"`
 }
 
 // Trend reads an account's retained hourly k buckets and segments. Segments
@@ -72,7 +75,7 @@ func (m *Manager) Trend(authIndex string) (Trend, bool, error) {
 		asOf = snap.at
 	}
 	trend := Trend{AuthIndex: authIndex, Loaded: snap != nil, From: asOf.Add(-params.retention()), At: now,
-		RetentionDays: params.SegmentRetentionDays, KMinWeeklyPoints: params.KMinWeeklyPoints, Exclusion: ExclusionRaw,
+		RetentionDays: params.SegmentRetentionDays, KMinWeeklyPoints: params.KMinWeeklyPoints, Exclusion: ExclusionRaw, Basis: BasisRaw,
 		Buckets: []KBucket{}, Segments: []TrendHour{}}
 	var segments []Segment
 	// The host's database, not withDB: that would create or migrate tables
@@ -97,6 +100,11 @@ func (m *Manager) Trend(authIndex string) (Trend, bool, error) {
 	var excluded []bool
 	var status AccountStatus
 	if snap != nil {
+		if snap.weights.basis == BasisWeighted {
+			// The estimate filtered the converted costs.
+			segments = ConvertSegments(segments, snap.weights.factors)
+			trend.Basis = BasisWeighted
+		}
 		excluded = SegmentExclusions(segments, params, snap.at)
 		trend.Exclusion = ExclusionEstimate
 		latest, _ := m.live(snap)

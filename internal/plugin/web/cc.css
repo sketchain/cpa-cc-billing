@@ -78,3 +78,22 @@
   .cc-trend-charts { grid-template-columns: minmax(0, 1fr); }
   .cc-trend-chart { height: 220px; }
 }
+.cc-section > h4 { margin: 16px 0 4px; font-size: 14px; }
+.cc-section > h4 + p.muted, .cc-calibrations > p.muted, .cc-weights-comparison > p.muted { margin: 0 0 8px; }
+.cc-calibrations > h4, .cc-weights-comparison > h4 { margin: 16px 0 4px; font-size: 14px; }
+.cc-weights-toggle { margin: 0 0 6px; }
+.cc-weights-unsplit { margin: 0 0 10px; }
+.cc-weights-model { overflow-wrap: anywhere; min-width: 160px; }
+.cc-weights-models { display: flex; flex-wrap: wrap; gap: 4px; max-width: 280px; }
+.cc-weights-name { width: 160px; max-width: 100%; }
+.cc-weights-estimate { display: grid; gap: 2px; min-width: 200px; }
+.cc-weights-params { margin-top: 12px; }
+.cc-calibration-controls { flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.cc-calibration-actions { white-space: nowrap; }
+.cc-calibration-actions button + button { margin-left: 6px; }
+.cc-basis-active { font-weight: 600; background: var(--app-accent-soft, var(--bg-hover)); }
+@media (max-width: 640px) {
+  .cc-calibration-controls > * { flex: 1 1 100%; }
+  .cc-calibration-controls .native-select, .cc-calibration-controls select { width: 100%; }
+}
+.cc-param-switch { max-width: 100%; padding-top: 4px; padding-bottom: 4px; white-space: normal; }

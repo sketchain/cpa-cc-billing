@@ -132,3 +132,28 @@ func BenchmarkCustomPriceLookup(b *testing.B) {
 		})
 	}
 }
+
+func TestPriceMultipliersCompareCustomWithOfficialPrices(t *testing.T) {
+	store := NewStore(nil, nil)
+	if _, err := store.UpsertPrice(CustomPrice{ModelID: "gpt-image-1.5", PriceRates: PriceRates{InputPer1M: 20, OutputPer1M: 64}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertPrice(CustomPrice{ModelID: "house-model", PriceRates: PriceRates{InputPer1M: 1, OutputPer1M: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	multipliers, err := store.PriceMultipliers([]string{"gpt-image-1.5", "house-model", "gpt-image-2.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := multipliers["gpt-image-1.5"]; !got.Custom || got.Input != 4 || got.Output != 2 || got.Official != PriceSourceBuiltin {
+		t.Fatalf("custom over builtin = %+v", got)
+	}
+	// Without an official price the multiplier is unknown.
+	if got := multipliers["house-model"]; !got.Custom || got.Input != 0 || got.Output != 0 {
+		t.Fatalf("custom only = %+v", got)
+	}
+	// Without a custom price the model is billed at its official price.
+	if got := multipliers["gpt-image-2.5"]; got.Custom || got.Input != 1 || got.Output != 1 {
+		t.Fatalf("official only = %+v", got)
+	}
+}
