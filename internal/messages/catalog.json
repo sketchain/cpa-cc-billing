@@ -660,5 +660,13 @@
       "%s",
       "%q"
     ]
+  },
+  "auth_index is required": {
+    "key": "backend.auth_index_is_required",
+    "formats": []
+  },
+  "The account is not configured in the CC split": {
+    "key": "backend.the_account_is_not_configured_in_the_cc_split",
+    "formats": []
   }
 }

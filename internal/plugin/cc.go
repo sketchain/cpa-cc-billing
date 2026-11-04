@@ -26,6 +26,7 @@ const (
 	routeCCConfig  = "/cc/settings"
 	routeCCRefresh = "/cc/refresh"
 	routeCCRebuild = "/cc/rebuild"
+	routeCCTrend   = "/cc/trend"
 	routeBalance   = "/balance"
 	routePriceJSON = "/prices/import"
 	routePanel     = "/panel-settings"
@@ -38,6 +39,7 @@ func init() {
 		managementEndpoint{http.MethodGet, routeCC, "View the CC split of Claude accounts between API keys", (*App).ccView},
 		managementEndpoint{http.MethodPut, routeCCConfig, "Update the CC split settings", (*App).ccPutSettings},
 		managementEndpoint{http.MethodPost, routeCCRefresh, "Process new usage into CC estimates", (*App).ccRefresh},
+		managementEndpoint{http.MethodGet, routeCCTrend, "View a CC account's retained hourly k evidence and 1% segments", (*App).ccTrend},
 		managementEndpoint{http.MethodPost, routeCCRebuild, "Rebuild CC segments from the retained request history", (*App).ccRebuild},
 		managementEndpoint{http.MethodPost, routePriceJSON, "Import custom model prices from a JSON price list", (*App).importPriceList},
 		managementEndpoint{http.MethodGet, routePanel, "View the page display and API key self-service settings", (*App).panelSettings},
@@ -348,6 +350,23 @@ func (a *App) ccRebuild(_ ManagementRequest) ManagementResponse {
 		return errorResponse(err)
 	}
 	return JSONResponse(http.StatusOK, map[string]any{"rebuilt": true})
+}
+
+// ccTrend returns an account's retained k evidence and segments for the
+// quota trend charts. It reads stored data only: no refresh, no writes.
+func (a *App) ccTrend(req ManagementRequest) ManagementResponse {
+	authIndex := strings.TrimSpace(req.Query.Get("auth_index"))
+	if authIndex == "" {
+		return JSONError(http.StatusBadRequest, "invalid", "auth_index is required")
+	}
+	trend, found, err := a.cc.Trend(authIndex)
+	if err != nil {
+		return errorResponse(err)
+	}
+	if !found {
+		return JSONError(http.StatusNotFound, "not_found", "The account is not configured in the CC split")
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"trend": trend})
 }
 
 // ccBalance answers new-api's Advanced Custom balance query for the presenting
