@@ -1081,5 +1081,9 @@
   "backend.cc_model_value_already_in_item_value": "模型 {v0} 已经在待测项 {v1} 里，一个模型只能属于一个待测项",
   "backend.cc_test_item_value_does_not_exist": "待测项 {v0} 不存在",
   "backend.cc_account_value_not_configured": "账号 {v0} 没有配置在 CC 分账里",
-  "backend.cc_account_value_already_calibrating": "账号 {v0} 正在校准，请先结束那次校准"
+  "backend.cc_account_value_already_calibrating": "账号 {v0} 正在校准，请先结束那次校准",
+  "backend.cc_pool_value_does_not_exist": "CC 分账池 {v0} 不存在",
+  "backend.a_simulation_can_add_at_most_value_fixed_keys": "一次模拟最多新增 {v0} 个固定 key",
+  "backend.a_simulated_key_needs_a_positive_weekly_amount": "模拟的 key 需要正数周额度、0 到 1 之间的 5h 比例和非负周用量",
+  "backend.only_fixed_keys_of_the_simulated_pool_can_be_changed": "只能修改所模拟池里的固定 key"
 }

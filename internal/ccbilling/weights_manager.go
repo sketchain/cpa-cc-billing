@@ -343,6 +343,8 @@ type AccountEstimate struct {
 	ColdStart  bool      `json:"cold_start"`
 	Used5h     float64   `json:"used_5h"`
 	Used7d     float64   `json:"used_7d"`
+	Reset5h    time.Time `json:"reset_5h,omitzero"`
+	Reset7d    time.Time `json:"reset_7d,omitzero"`
 	ObservedAt time.Time `json:"observed_at,omitzero"`
 }
 
@@ -379,7 +381,7 @@ func (m *Manager) Estimates() (Estimates, bool) {
 		result.Accounts[index] = AccountEstimate{AuthIndex: index,
 			BasisValues: basisValues(index, snap.settings, account.estimate, account, latest[index], now),
 			K:           status.K, KSource: status.KSource, ColdStart: status.ColdStart, Used5h: status.Used5h, Used7d: status.Used7d,
-			ObservedAt: status.ObservedAt}
+			Reset5h: status.Reset5h, Reset7d: status.Reset7d, ObservedAt: status.ObservedAt}
 	}
 	return result, true
 }

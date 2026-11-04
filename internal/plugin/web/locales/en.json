@@ -1081,5 +1081,9 @@
   "backend.cc_model_value_already_in_item_value": "Model {v0} is already in test item {v1}; a model can belong to only one item",
   "backend.cc_test_item_value_does_not_exist": "Model test item {v0} does not exist",
   "backend.cc_account_value_not_configured": "Account {v0} is not configured in the CC split",
-  "backend.cc_account_value_already_calibrating": "Account {v0} is already calibrating; end that calibration first"
+  "backend.cc_account_value_already_calibrating": "Account {v0} is already calibrating; end that calibration first",
+  "backend.cc_pool_value_does_not_exist": "CC pool {v0} does not exist",
+  "backend.a_simulation_can_add_at_most_value_fixed_keys": "A simulation can add at most {v0} fixed keys",
+  "backend.a_simulated_key_needs_a_positive_weekly_amount": "A simulated key needs a positive weekly amount, a 5-hour share from 0 to 1 and a non-negative weekly usage",
+  "backend.only_fixed_keys_of_the_simulated_pool_can_be_changed": "Only fixed keys of the simulated pool can be changed"
 }

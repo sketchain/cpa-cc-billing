@@ -693,5 +693,25 @@
     "formats": [
       "%q"
     ]
+  },
+  "CC pool %q does not exist": {
+    "key": "backend.cc_pool_value_does_not_exist",
+    "formats": [
+      "%q"
+    ]
+  },
+  "A simulation can add at most %d fixed keys": {
+    "key": "backend.a_simulation_can_add_at_most_value_fixed_keys",
+    "formats": [
+      "%d"
+    ]
+  },
+  "A simulated key needs a positive weekly amount, a 5-hour share from 0 to 1 and a non-negative weekly usage": {
+    "key": "backend.a_simulated_key_needs_a_positive_weekly_amount",
+    "formats": []
+  },
+  "Only fixed keys of the simulated pool can be changed": {
+    "key": "backend.only_fixed_keys_of_the_simulated_pool_can_be_changed",
+    "formats": []
   }
 }

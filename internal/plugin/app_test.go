@@ -133,6 +133,7 @@ func TestManagementRegistrationExposesOnlyCurrentEndpoints(t *testing.T) {
 		"GET /ai-providers", "POST /ai-providers/balance", "POST /ai-providers/note",
 		"GET /cc", "PUT /cc/settings", "POST /cc/refresh", "GET /cc/trend", "POST /cc/rebuild", "POST /prices/import",
 		"POST /cc/calibrations", "POST /cc/calibrations/stop", "DELETE /cc/calibrations", "GET /cc/estimates",
+		"GET /cc/forecast", "POST /cc/simulate", "GET /cc/key-usage",
 		"GET /panel-settings", "PUT /panel-settings",
 	} {
 		wantRoutes[value] = false
