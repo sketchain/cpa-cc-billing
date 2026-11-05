@@ -81,7 +81,10 @@ type accountCache struct {
 
 // accountSnapshot is what a refresh computed about an account.
 type accountSnapshot struct {
+	// estimate is on the basis in effect; raw and weighted are both bases.
 	estimate Estimate
+	raw      Estimate
+	weighted Estimate
 	k        KEstimate
 	weekly   WeeklyPeriod
 	hasWeek  bool
@@ -108,6 +111,7 @@ type snapshot struct {
 	settings Settings
 	accounts map[string]accountSnapshot
 	keys     map[string]keySnapshot
+	weights  weightsSnapshot
 }
 
 type costDelta struct {
@@ -149,7 +153,16 @@ type Manager struct {
 	alignMu    sync.Mutex
 	alignments map[string]alignmentEntry
 
+	// weightCache holds the last weight estimate and the inputs it used; it
+	// belongs to refreshMu.
+	weightCache weightCache
+
 	panel atomic.Pointer[PanelSettings]
+
+	// blockMu guards the refusal counts not yet saved.
+	blockMu       sync.Mutex
+	blocks        map[blockKey]int64
+	blocksDropped int64
 
 	lastError      atomic.Value
 	loggedUnloaded atomic.Bool
@@ -213,6 +226,7 @@ func (m *Manager) Rebuild() error {
 		return err
 	}
 	m.accounts = map[string]*accountCache{}
+	m.weightCache = weightCache{}
 	return m.refreshLocked()
 }
 
@@ -232,6 +246,11 @@ func (m *Manager) MaybeRefresh() {
 	}
 	defer m.refreshMu.Unlock()
 	if m.snap.Load() != nil && m.host.Now().Sub(m.lastRefresh) < m.RefreshInterval {
+		if m.pendingBlocks() {
+			if err := m.withDB(m.flushBlocksLocked); err != nil {
+				m.recordError(err)
+			}
+		}
 		return
 	}
 	_ = m.refreshLocked()
@@ -349,6 +368,7 @@ func (m *Manager) withDB(fn func(*sql.DB) error) error {
 			m.loaded.Store(&settings)
 			m.panel.Store(&panel)
 			m.accounts = map[string]*accountCache{}
+			m.weightCache = weightCache{}
 			m.lastRefresh, m.lastPrune = time.Time{}, time.Time{}
 			m.snap.Store(nil)
 			m.liveMu.Lock()
@@ -367,7 +387,12 @@ func (m *Manager) withDB(fn func(*sql.DB) error) error {
 func (m *Manager) refreshLocked() error {
 	now := m.host.Now()
 	accounts := map[string]accountSnapshot{}
+	var weights weightsSnapshot
 	err := m.withDB(func(db *sql.DB) error {
+		if err := m.flushBlocksLocked(db); err != nil {
+			// Counts stay pending; the estimates must not wait for them.
+			m.recordError(err)
+		}
 		params := m.settings.Params
 		cutoff := now.Add(-params.retention())
 		if m.lastPrune.IsZero() || now.Sub(m.lastPrune) > time.Hour {
@@ -408,10 +433,24 @@ func (m *Manager) refreshLocked() error {
 				first++
 			}
 			cache.buckets = cache.buckets[first:]
-			accounts[authIndex] = accountSnapshot{
-				estimate: EstimateSegments(cache.segments, params, now), k: EstimateK(cache.buckets, params, now),
-				cursor: cache.stream.Cursor, kCursor: cache.stream.K.Cursor,
+		}
+		var err error
+		if weights, err = m.refreshWeights(db, now); err != nil {
+			return err
+		}
+		for _, authIndex := range m.settings.authIndexes() {
+			cache := m.accounts[authIndex]
+			account := accountSnapshot{k: EstimateK(cache.buckets, params, now), cursor: cache.stream.Cursor, kCursor: cache.stream.K.Cursor}
+			account.raw = EstimateSegments(cache.segments, params, now)
+			account.weighted = account.raw
+			if len(weights.factors) > 0 {
+				account.weighted = EstimateSegments(ConvertSegments(cache.segments, weights.factors), params, now)
 			}
+			account.estimate = account.raw
+			if weights.basis == BasisWeighted {
+				account.estimate = account.weighted
+			}
+			accounts[authIndex] = account
 		}
 		return nil
 	})
@@ -453,7 +492,7 @@ func (m *Manager) refreshLocked() error {
 		}
 		accounts[index] = account
 	}
-	snap := &snapshot{at: now, settings: m.settings, accounts: accounts, keys: map[string]keySnapshot{}}
+	snap := &snapshot{at: now, settings: m.settings, accounts: accounts, keys: map[string]keySnapshot{}, weights: weights}
 	// included is, per key, the usage sequence number every read of the key
 	// includes; live usage at or below it is already counted.
 	included := map[string]uint64{}
@@ -861,6 +900,7 @@ type View struct {
 	Pools    []PoolStatus  `json:"pools"`
 	Keys     []KeyStatus   `json:"keys"`
 	Segments int           `json:"stored_segments"`
+	Weights  WeightsView   `json:"weights"`
 	Error    string        `json:"error,omitempty"`
 	At       time.Time     `json:"at"`
 	// Loaded is false while no estimate snapshot exists.
@@ -883,7 +923,7 @@ func (m *Manager) View() (View, error) {
 			return View{}, refreshErr
 		}
 		return View{Settings: *settings, Defaults: DefaultParams(), Accounts: []AccountView{}, Pools: []PoolStatus{}, Keys: []KeyStatus{},
-			Error: m.lastError.Load().(string), At: now}, nil
+			Weights: emptyWeightsView(), Error: m.lastError.Load().(string), At: now}, nil
 	}
 	view := View{Settings: snap.settings, Defaults: DefaultParams(), Accounts: []AccountView{}, Pools: []PoolStatus{}, Keys: []KeyStatus{},
 		Error: m.lastError.Load().(string), At: now, Loaded: true}
@@ -894,6 +934,7 @@ func (m *Manager) View() (View, error) {
 	})
 	m.refreshMu.Unlock()
 	latest, deltas := m.live(snap)
+	view.Weights = weightsView(snap, latest, now)
 	for _, index := range snap.settings.authIndexes() {
 		account := AccountView{AccountStatus: accountStatus(snap, latest, index, now), RecentBlocks: []BlockSummary{}}
 		cached := snap.accounts[index]

@@ -1796,6 +1796,66 @@ CC_SETTINGS = {
              LIVE_KEYS[1]["scope"]: {"kind": "remainder", "pool_id": "pool-1", "weekly_cap_usd": 300},
              # A key deleted from CLIProxyAPI that the settings still list.
              "f" * 64: {"kind": "remainder", "pool_id": "pool-2"}},
+    "weights": {"enabled": False, "min_segments": 30, "min_cost_usd": 20, "min_share_spread": 0.05,
+                "items": [{"id": "item-1", "name": "Fable", "models": ["claude-fable-20260801", "claude-fable-20261001"]},
+                          {"id": "item-2", "name": "Haiku", "models": ["claude-haiku-4-5"], "manual_multiplier": 0.6}]},
+}
+CC_CALIBRATIONS = [
+    {"id": 2, "item": {"id": "item-1", "name": "Fable", "models": ["claude-fable-20260801", "claude-fable-20261001"]},
+     "auth_index": "auth-demo-claude", "started_at": iso(NOW - timedelta(hours=3)), "final": False,
+     "result": {"status": "running", "item_segments": 6, "item_gain": 6, "item_cost_usd": 0.6, "item_usd_per_point": 0.1,
+                "base_segments": 0, "base_gain": 0, "base_cost_usd": 0, "base_from": "period", "excluded_segments": 2, "unsplit_segments": 0}},
+    {"id": 1, "item": {"id": "item-1", "name": "Fable", "models": ["claude-fable-20261001"]}, "auth_index": "auth-demo-claude",
+     "started_at": iso(NOW - timedelta(days=3, hours=4)), "ended_at": iso(NOW - timedelta(days=3, hours=2)), "final": True,
+     "result": {"status": "ok", "multiplier": 3.92, "std_err": 0.21, "low": 3.51, "high": 4.33, "item_segments": 48, "item_gain": 52,
+                "item_cost_usd": 5.6, "item_usd_per_point": 0.1077, "base_segments": 31, "base_gain": 31, "base_cost_usd": 13.1,
+                "base_usd_per_point": 0.4226, "base_from": "recent", "excluded_segments": 7, "unsplit_segments": 1}},
+]
+
+
+def cc_weights_view(accounts):
+    weights = CC_SETTINGS.get("weights") or {"items": []}
+    usage = [("claude-sonnet-4-5", 812.4, 2310), ("claude-opus-4-5", 402.1, 1104), ("claude-fable-20261001", 188.6, 640),
+             ("claude-fable-20260801", 21.3, 77), ("claude-haiku-4-5", 9.8, 41), ("", 66.0, 180)]
+    total = sum(cost for _, cost, _ in usage)
+    owner = {model: item["id"] for item in weights["items"] for model in item["models"]}
+    models = [{"model": model, "cost_usd": cost, "share": cost / total, "segments": count, **({"item_id": owner[model]} if model in owner else {})}
+              for model, cost, count in usage]
+    statuses = {"item-1": {"status": "ok", "multiplier": 4.08, "std_err": 0.17, "low": 3.75, "high": 4.41, "segments": 717,
+                           "cost_usd": 209.9, "share": 0.14, "share_min": 0.0, "share_max": 0.86, "share_spread": 0.19, "vif": 3.2},
+                "item-2": {"status": "collinear", "segments": 41, "cost_usd": 9.8, "share": 0.007, "share_min": 0.004,
+                           "share_max": 0.012, "share_spread": 0.002}}
+    estimate_items, effective = [], []
+    for item in weights["items"]:
+        estimate = {"id": item["id"], **statuses.get(item["id"], {"status": "insufficient", "segments": 0, "cost_usd": 0, "share": 0,
+                                                                 "share_min": 0, "share_max": 0, "share_spread": 0})}
+        estimate_items.append(estimate)
+        weight = {"id": item["id"], "name": item.get("name", ""), "models": item["models"], "multiplier": 1, "source": "default",
+                  "status": estimate["status"]}
+        if item.get("manual_multiplier") is not None:
+            weight.update(multiplier=item["manual_multiplier"], source="manual")
+        elif item["id"] == "item-1":
+            weight.update(multiplier=3.92, source="calibration", calibration_id=1)
+        elif estimate["status"] == "ok":
+            weight.update(multiplier=estimate["multiplier"], source="estimated")
+        effective.append(weight)
+    comparison = [{"auth_index": account["auth_index"],
+                   "raw": {"ratio": 2.21, "usd_per_point": 0.4525, "five_hour_usd": 45.2, "weekly_usd": 272.1, "totals_from": "estimated",
+                           "segments": 1180, "excluded_segments": 174, "clean_blocks": 28},
+                   "weighted": {"ratio": 2.48, "usd_per_point": 0.4032, "five_hour_usd": 40.3, "weekly_usd": 242.6,
+                                "totals_from": "estimated", "segments": 1180, "excluded_segments": 61, "clean_blocks": 31}}
+                  for account in accounts]
+    return {"basis": "weighted" if weights.get("enabled") else "raw",
+            "estimate": {"items": estimate_items, "chunks": 412, "segments": 3980, "excluded_segments": 211, "unsplit_segments": 180,
+                         "iterations": 3, "converged": True},
+            "effective": effective, "calibrations": CC_CALIBRATIONS, "models": models, "comparison": comparison,
+            "unsplit_segments": 180, "segments": 4352}
+
+
+CC_PRICE_MULTIPLIERS = {
+    "claude-fable-20261001": {"model": "claude-fable-20261001", "custom": True, "input": 2, "output": 2, "official_source": "reference"},
+    "claude-fable-20260801": {"model": "claude-fable-20260801", "custom": True, "input": 2, "output": 2, "official_source": "reference"},
+    "claude-haiku-4-5": {"model": "claude-haiku-4-5", "custom": False, "input": 1, "output": 1, "official_source": ""},
 }
 
 
@@ -1868,12 +1928,15 @@ def cc_payload():
     options = [{"scope": key["scope"], "preview": key["preview"], "label": key["label"], "plan_name": key.get("plan_name", ""),
                 "has_weekly_window": True} for key in LIVE_KEYS]
     if not CC_LOADED[0]:
+        empty = {"basis": "raw", "estimate": {"items": []}, "effective": [], "calibrations": [], "models": [], "comparison": [],
+                 "unsplit_segments": 0, "segments": 0}
         return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "accounts": [], "pools": [], "keys": [],
-                       "stored_segments": 0, "at": iso(NOW), "loaded": False, "error": "database is locked"},
-                "credentials": credentials, "key_options": options, "credential_warning": ""}
+                       "stored_segments": 0, "weights": empty, "at": iso(NOW), "loaded": False, "error": "database is locked"},
+                "credentials": credentials, "key_options": options, "credential_warning": "", "price_multipliers": {}, "price_warning": ""}
     return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "accounts": accounts, "pools": pools, "keys": keys,
-                   "stored_segments": 1180, "at": iso(NOW), "loaded": True},
-            "credentials": credentials, "key_options": options, "credential_warning": ""}
+                   "stored_segments": 1180, "weights": cc_weights_view(accounts), "at": iso(NOW), "loaded": True},
+            "credentials": credentials, "key_options": options, "credential_warning": "", "price_multipliers": CC_PRICE_MULTIPLIERS,
+            "price_warning": ""}
 
 
 def cc_trend_payload(auth_index):
@@ -1910,6 +1973,160 @@ def cc_trend_payload(auth_index):
                       "exclusion": "estimate" if CC_LOADED[0] else "raw", "buckets": buckets, "segment_hours": segments}}
 
 
+def cc_velocity(per_hour, start=None, end=None, recorded=0.0, basis=0.0, usd_per_point=0.0, minutes=60, outcome=None, block=None):
+    velocity = {"available": per_hour is not None, "per_hour": per_hour or 0, "from": iso(NOW - timedelta(minutes=minutes)), "to": iso(NOW),
+                "start_used": start or 0, "end_used": end or 0, "recorded_usd": recorded, "basis_usd": basis,
+                "outcome": outcome or {"status": "unknown"}}
+    if usd_per_point:
+        velocity["usd_per_point"] = usd_per_point
+    if block:
+        velocity["block"] = block
+    return velocity
+
+
+def cc_forecast_payload(query):
+    """Forecasts of the demo pool: the 5h window runs out before its reset,
+    the week does not, and the remainder keys hit the 5h reserve soon."""
+    window_5h = int(query.get("window_5h_minutes", ["60"])[0])
+    window_7d = int(query.get("window_7d_hours", ["24"])[0])
+    reset_5h, reset_7d = NOW + timedelta(hours=2, minutes=14), NOW + timedelta(days=3, hours=4)
+    eta = lambda hours: {"status": "eta", "at": iso(NOW + timedelta(hours=hours))}
+    later = lambda hours: {"status": "after_reset", "at": iso(NOW + timedelta(hours=hours))}
+    weighted = CC_SETTINGS.get("weights", {}).get("enabled")
+    conversion = {"basis": "weighted" if weighted else "raw", "factors": {"claude-fable-20261001": 3.92, "claude-fable-20260801": 3.92} if weighted else {},
+                  "priced_models": ["claude-haiku-4-5"] if weighted else []}
+    pools = []
+    for pool in CC_SETTINGS["pools"]:
+        accounts = []
+        for index, auth_index in enumerate(pool["auth_indexes"]):
+            if index == 0:
+                five = {"used": 37, "reset_at": iso(reset_5h), "source": "reading", "outcome": eta(1.6),
+                        "reading": cc_velocity(39.4, 0, 37, minutes=window_5h, outcome=eta(1.6)),
+                        "spend": cc_velocity(31.0, recorded=12.6, basis=14.1, usd_per_point=0.452, minutes=window_5h, outcome=eta(2.03))}
+                week = {"used": 58, "reset_at": iso(reset_7d), "source": "reading", "outcome": later(118),
+                        "reading": cc_velocity(0.355, 49.5, 58, minutes=window_7d * 60, outcome=later(118)),
+                        "spend": cc_velocity(0.31, recorded=74.2, basis=81.0, usd_per_point=2.72, minutes=window_7d * 60, outcome=later(135))}
+            else:
+                five = {"used": 0, "source": "spend", "outcome": {"status": "idle"}, "reading": cc_velocity(None, minutes=window_5h),
+                        "spend": cc_velocity(0, usd_per_point=0.452, minutes=window_5h, outcome={"status": "idle"})}
+                week = {"used": 12, "reset_at": iso(reset_7d - timedelta(hours=30)), "source": "none", "outcome": {"status": "unknown"},
+                        "reading": cc_velocity(None, minutes=window_7d * 60), "spend": cc_velocity(None, minutes=window_7d * 60)}
+            accounts.append({"auth_index": auth_index, "five_hour": five, "week": week})
+        five_pool = {"enabled": bool(accounts), "remaining_usd": 25.6, "reserved_usd": 13.5, "headroom_usd": 12.1, "reset_at": iso(reset_5h),
+                     "reading": cc_velocity(16.0, minutes=window_5h, outcome=eta(1.6), block=eta(0.82)),
+                     "spend": cc_velocity(12.7, recorded=12.6, basis=14.1, minutes=window_5h, outcome=eta(2.02), block=eta(1.05)),
+                     "reading_partial": len(accounts) > 1, "fixed_usd": 1.3, "fixed_per_hour": 1.3, "source": "reading",
+                     "exhaust": eta(1.6), "block": eta(0.82)}
+        week_pool = {"enabled": bool(accounts), "remaining_usd": 135.8, "reserved_usd": 57.5, "headroom_usd": 78.3, "reset_at": iso(reset_7d),
+                     "reading": cc_velocity(0.87, minutes=window_7d * 60, outcome=later(156), block=later(104)),
+                     "spend": cc_velocity(0.76, recorded=74.2, basis=81.0, minutes=window_7d * 60, outcome=later(178), block=later(120)),
+                     "reading_partial": len(accounts) > 1, "fixed_usd": 3.7, "fixed_per_hour": 0.15, "source": "reading",
+                     "exhaust": later(156), "block": later(104)}
+        if not accounts:
+            five_pool.update(reading=cc_velocity(None), spend=cc_velocity(None), source="none", exhaust={"status": "unknown"}, block={"status": "unknown"})
+            week_pool.update(reading=cc_velocity(None), spend=cc_velocity(None), source="none", exhaust={"status": "unknown"}, block={"status": "unknown"})
+        pools.append({"id": pool["id"], "name": pool["name"], "accounts": accounts, "five_hour": five_pool, "week": week_pool})
+    return {"forecast": {"at": iso(NOW), "window_5h_seconds": window_5h * 60, "window_7d_seconds": window_7d * 3600, "safety_factor": 0.9,
+                         "conversion": conversion, "pools": pools}}
+
+
+def cc_cycle_starts(days):
+    end = NOW + timedelta(days=3, hours=4)
+    starts = []
+    while end - timedelta(days=7) > NOW - timedelta(days=days):
+        starts.append(end - timedelta(days=7))
+        end -= timedelta(days=7)
+    return sorted(starts)
+
+
+def cc_key_usage_payload():
+    """40 days of hourly key spend with a quiet weekend gap, the remainder
+    key's refusals and the fixed key's cycles."""
+    days = 40
+    usage_from = NOW - timedelta(days=days)
+    pools = []
+    for pool in CC_SETTINGS["pools"]:
+        keys = []
+        for scope, settings in sorted(CC_SETTINGS["keys"].items()):
+            if settings.get("pool_id") != pool["id"]:
+                continue
+            key = next((item for item in KEYS if item["scope"] == scope), {})
+            rng = random.Random(scope)
+            hours, blocks = [], []
+            for day in range(days, -1, -1):
+                start = (NOW - timedelta(days=day)).replace(minute=0, second=0, microsecond=0)
+                if day in {11, 12} or not pool["auth_indexes"]:
+                    continue
+                for hour in range(9, 23):
+                    at = start.replace(hour=hour)
+                    if at > NOW:
+                        break
+                    scale = 1.8 if settings["kind"] == "fixed" else 1.1
+                    hours.append([int(at.timestamp()), round(rng.uniform(0.2, 1.0) * scale, 4)])
+                    if settings["kind"] == "remainder" and hour in {15, 16, 17} and day % 3 == 0:
+                        blocks.append({"at": iso(at), "reason": "five_hour_reserve", "count": rng.randint(2, 30)})
+                    if settings["kind"] == "remainder" and hour == 21 and day % 7 == 1:
+                        blocks.append({"at": iso(at), "reason": "weekly_reserve", "count": rng.randint(5, 40)})
+            series = {"scope": scope, "preview": key.get("preview"), "label": key.get("label"), "kind": settings["kind"], "hours": hours,
+                      "blocks": blocks, "cycles": []}
+            if settings["kind"] == "fixed":
+                series["weekly_usd"] = 100
+                for start in cc_cycle_starts(days):
+                    end = start + timedelta(days=7)
+                    used = sum(usd for seconds, usd in hours if start.timestamp() <= seconds < end.timestamp())
+                    settled = end <= NOW
+                    series["cycles"].append({"start": iso(start), "end": iso(end), "weekly_usd": 100, "used_usd": round(used, 2),
+                                             "forfeited_usd": round(max(0, 100 - used), 2) if settled else 0,
+                                             "remaining_usd": 0 if settled else round(max(0, 100 - used), 2),
+                                             "settled": settled, "partial": start < usage_from})
+            keys.append(series)
+        pools.append({"id": pool["id"], "name": pool["name"], "keys": keys})
+    return {"usage": {"at": iso(NOW), "from": iso(usage_from), "pools": pools}}
+
+
+def cc_simulate_payload(body):
+    pool = next((item for item in CC_SETTINGS["pools"] if item["id"] == body.get("pool_id") and item["auth_indexes"]), None)
+    if pool is None:
+        return 400, {"error": {"code": "invalid", "message": "CC pool does not exist", "message_key": "backend.cc_pool_value_does_not_exist",
+                               "message_params": {"v0": json.dumps(body.get("pool_id", ""))}}}
+    added = sum(item.get("weekly_usage_usd", item.get("weekly_usd", 0)) for item in body.get("add", []))
+    extra = int(added // 8)
+    weeks = []
+    total = {"baseline": {}, "scenario": {}}
+    for index, start in enumerate(cc_cycle_starts(40)):
+        end = start + timedelta(days=7)
+        running = end > NOW
+        base = {"hours": 168 if not running else int((NOW - start).total_seconds() // 3600), "blocked_hours": 3 + index % 4,
+                "blocked_week_hours": index % 2, "blocked_five_hour_hours": 3 + index % 4 - index % 2, "lost_usd": 4.2 + index,
+                "oversold_week_hours": 0, "oversold_five_hour_hours": index % 3, "max_shortfall_usd": 2.1 if index % 3 else 0}
+        scenario = dict(base, blocked_hours=base["blocked_hours"] + extra, blocked_five_hour_hours=base["blocked_five_hour_hours"] + extra,
+                        lost_usd=base["lost_usd"] + extra * 1.7, oversold_week_hours=extra // 3, oversold_five_hour_hours=base["oversold_five_hour_hours"] + extra // 2,
+                        max_shortfall_usd=base["max_shortfall_usd"] + extra * 0.9)
+        if scenario["oversold_week_hours"]:
+            scenario["first_oversold"] = iso(start + timedelta(days=5, hours=19))
+        weeks.append({"start": iso(start), "end": iso(end), "observed": index > 0, "partial": index == 0 or running, "running": running,
+                      "baseline": base, "scenario": scenario})
+        for name, outcome in (("baseline", base), ("scenario", scenario)):
+            for field, value in outcome.items():
+                if field == "first_oversold":
+                    continue
+                total[name][field] = max(total[name].get(field, 0), value) if field == "max_shortfall_usd" else total[name].get(field, 0) + value
+    spans = [{"window": "five_hour" if index % 2 else "week", "from": iso(NOW - timedelta(days=3 * index + 1, hours=4)),
+              "to": iso(NOW - timedelta(days=3 * index + 1, hours=2)), "max_shortfall_usd": 3.4 + index} for index in range(min(extra, 6))]
+    approximations = ["current_estimates", "readings_external", "hourly", "remainder_demand", "current_quota", "derived_cycles", "partial_cycles"]
+    if body.get("add"):
+        approximations.append("new_key_profile")
+    if body.get("changes"):
+        approximations.append("quota_changes")
+    weighted = CC_SETTINGS.get("weights", {}).get("enabled")
+    return 200, {"simulation": {"pool_id": pool["id"], "from": iso(NOW - timedelta(days=40)), "to": iso(NOW),
+                                "conversion": {"basis": "weighted" if weighted else "raw", "factors": {"claude-fable-20261001": 3.92} if weighted else {}, "priced_models": []},
+                                "safety_factor": 0.9, "k": 6.02, "five_hour_enabled": True,
+                                "accounts": [{"auth_index": index, "weekly_usd": 272.1, "five_hour_usd": 45.2} for index in pool["auth_indexes"]],
+                                "keys": [], "remainder_keys": 1, "weeks": weeks, "baseline": total["baseline"], "scenario": total["scenario"],
+                                "oversold_spans": spans, "oversold_spans_truncated": False, "approximations": approximations}}
+
+
 def route_rows():
     return [dict(route, credential_labels=credential_labels(route["rule"].get("credential_ids", []) + route["rule"].get("denied_credential_ids", []))) for route in ROUTES]
 
@@ -1919,6 +2136,10 @@ def payload_for(path, query):
         return cc_payload()
     if path == f"{API_BASE}/cc/trend":
         return cc_trend_payload(query.get("auth_index", [""])[0])
+    if path == f"{API_BASE}/cc/forecast":
+        return cc_forecast_payload(query) if CC_LOADED[0] else None
+    if path == f"{API_BASE}/cc/key-usage":
+        return cc_key_usage_payload() if CC_LOADED[0] else None
     if path == f"{API_BASE}/keys":
         refresh_route_counts()
         return {"keys": key_rows()}
@@ -2240,8 +2461,29 @@ class Handler(BaseHTTPRequestHandler):
             CC_SETTINGS.clear()
             CC_SETTINGS.update(json.loads(request_body or b"{}"))
             self.send_json(200, {"settings": CC_SETTINGS})
+        elif route == ("POST", f"{API_BASE}/cc/simulate"):
+            self.send_json(*cc_simulate_payload(json.loads(request_body or b"{}")))
         elif route in {("POST", f"{API_BASE}/cc/refresh"), ("POST", f"{API_BASE}/cc/rebuild")}:
             self.send_json(200, {"refreshed": True})
+        elif route == ("POST", f"{API_BASE}/cc/calibrations"):
+            body = json.loads(request_body or b"{}")
+            item = next((item for item in CC_SETTINGS.get("weights", {}).get("items", []) if item["id"] == body.get("item_id")), None)
+            if item is None or any(c["auth_index"] == body.get("auth_index") and not c.get("ended_at") for c in CC_CALIBRATIONS):
+                self.send_json(400, {"error": {"code": "invalid", "message": "Invalid calibration"}})
+                return
+            calibration = {"id": max([c["id"] for c in CC_CALIBRATIONS] + [0]) + 1, "item": item, "auth_index": body.get("auth_index"),
+                           "started_at": iso(NOW), "final": False,
+                           "result": {"status": "running", "item_segments": 0, "item_gain": 0, "item_cost_usd": 0, "base_segments": 0,
+                                      "base_gain": 0, "base_cost_usd": 0, "base_from": "period", "excluded_segments": 0, "unsplit_segments": 0}}
+            CC_CALIBRATIONS.insert(0, calibration)
+            self.send_json(200, {"calibration": calibration})
+        elif route == ("POST", f"{API_BASE}/cc/calibrations/stop"):
+            body = json.loads(request_body or b"{}")
+            for calibration in CC_CALIBRATIONS:
+                if calibration["id"] == body.get("id") and not calibration.get("ended_at"):
+                    calibration["ended_at"] = iso(NOW)
+                    calibration["result"]["status"] = "insufficient"
+            self.send_json(200, {"stopped": True})
         elif route == ("POST", f"{API_BASE}/prices/import"):
             body = json.loads(request_body or b"[]")
             entries = body if isinstance(body, list) else body.get("models", [])
@@ -2325,6 +2567,10 @@ class Handler(BaseHTTPRequestHandler):
             row.update(body)
             row["source"] = "custom"
             self.send_json(200, {"price": row})
+        elif route == ("DELETE", f"{API_BASE}/cc/calibrations"):
+            target = parse_qs(parsed.query).get("id", [""])[0]
+            CC_CALIBRATIONS[:] = [c for c in CC_CALIBRATIONS if str(c["id"]) != target]
+            self.send_json(200, {"deleted": True})
         elif route == ("DELETE", f"{API_BASE}/prices"):
             model = parse_qs(parsed.query).get("model_id", [""])[0]
             row = next((price for price in PRICES if price["model_id"] == model), None)

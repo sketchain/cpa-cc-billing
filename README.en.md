@@ -17,6 +17,7 @@ A fork of [cpa-key-billing](https://github.com/haowang02/cpa-plugin-key-billing)
 
 - **CC split**: fixed keys get a fixed weekly amount (for example $100 a week), while remainder keys may only use what the account has left after reserving the fixed keys' unused amounts (weekly and 5-hour reservations).
 - Estimates each Claude account's total in USD only from passively observed utilization headers, never polling upstream, and filters out usage of the account outside CPA.
+- A consumption forecast, a fixed key simulation and per-key usage charts, to judge whether a pool can take another key.
 - A balance endpoint for new-api Advanced Custom channels.
 - Bulk import of custom prices from a JSON price list.
 
@@ -100,6 +101,46 @@ The CC split page draws two daily charts for each pooled account, splitting days
 - Daily gains and projected weekly total: bars of the day's 5-hour and weekly gains, with the projected weekly total = k × $/1% × 100 on the right axis. $/1% is the cost over the gain of the day's segments, using only the segments the estimate kept; while the estimates are not loaded, no exclusion result exists and every stored segment counts. When the day's k is missing or imprecise the rolling k is used (diamond points).
 
 Hovering shows the day's two gains, segments, cost, daily k, rolling k, $/1% and projected weekly total; the range switches between 7, 14 and 30 days and the whole retention. The charts read the stored hourly k evidence and 1% segments only: opening them never refreshes the estimates or writes to the database, and API key users do not see them.
+
+### Model quota weights
+
+Some models may use more subscription quota per USD than their API price suggests. On the CC split page, mark such models as **test items** (several names of one model can form one item); every other model is baseline with a weight of 1.
+
+- **Per-model split**: every 1% segment also records its cost by billing model. Segments recorded before the upgrade have no split and count as baseline; **Rebuild from history** recreates every segment with its split from the retained request records (segments older than the request retention cannot be split).
+- **Historical estimate**: each segment's gain ≈ s × (baseline cost + Σ mᵢ × item i's cost), with an s per account and the multipliers mᵢ shared. Segments are cut into chunks of about 30 minutes, ending only at rises and by elapsed time rather than gain (cutting at a fixed gain moves the rounding error into the costs and biases the multipliers towards 1), and fitted by weighted least squares with the totals' time weighting (the last 14 days count 90%). The result gives each multiplier, its standard error and 95% interval, the segments used and the share range.
+- **No filtering loop**: filtering judges $/1%, so on the raw basis segments heavy in a tested model look like outside usage. The multiplier estimate always filters on the converted basis, whatever the switch says: a robust fit of every segment that trims chunks far above the prediction gives the first multipliers, then filtering the converted costs and refitting the clean chunks alternate until they settle. A chunk with any excluded segment is dropped whole rather than cut there.
+- **When no number is given**: too few clean segments or too little cost include the item (defaults 30 segments, $20): **not enough samples**; its share varies too little across chunks (standard deviation below 5% by default) or its variance inflation is too large: **share varies too little; calibrate**; a standard error above half the multiplier: **unstable estimate**.
+- **Calibration**: choose an item and an account and press **Start calibration**, then **End calibration**. Segments of the period containing only the item give its $/1%, compared with baseline-only segments of the period (with fewer than 10, the account's recent baseline segments before it are added); segments mixing other models are excluded and counted. Once ended and processed, the result is stored and can be viewed or deleted.
+- **Using the weights**: the switch **Use model multipliers in estimates** is off by default, and the estimate is then exactly as before. When on, every segment's cost is converted to the baseline basis (baseline cost + Σ mᵢ × Cᵢ) before filtering and weighting, so $/1% means baseline-model USD per 1%. Multipliers come from a manual override, then the latest calibration, then the historical estimate; an item with none counts as 1 and is marked. The page lists $/1%, weekly totals and excluded segments on both bases.
+- **Pricing hint**: each item shows a suggested price multiplier (quota multiplier × current price multiplier, since segment costs are recorded at current prices) and its custom price over the official price. Display only; prices are never changed.
+
+The multipliers are computed during refreshes into the snapshot; admission only reads the snapshot. `GET /cc/estimates` returns every account's estimate and the multipliers on the basis in effect.
+
+### Consumption forecast
+
+Below the account table, the CC split page lists for each pool and account when the 5-hour and weekly usage will reach 100%, and when remainder keys will be refused by the weekly or 5-hour reservation (when the pool's remaining R minus the reservation P reaches 0).
+
+- **Rate**: by default the last hour for the 5-hour window and the last 24 hours for the week, adjustable on the page (5–300 minutes / 1–168 hours, remembered in this browser only). The rise of the accounts' utilization readings comes first (a window that reset within the range starts from 0%, and only readings of the current window count); the pool keys' live spend converted with the estimated $/1% is shown beside it and used for accounts without readings.
+- **Basis**: with **Use model multipliers in estimates** on, capacity is in baseline USD while key spend is billed at the price table, so the spend is converted with the effective multipliers first; a model whose price multiplier already equals its quota multiplier is not converted again. The tooltip names the basis used.
+- **Remainder refusals**: R falls with the readings (or spend × the safety factor s) and P with the spend of fixed keys that still hold a reservation; the forecast is (R − P) ÷ (R's rate − P's rate).
+- When the linear forecast lands after the window's reset, the cell reads **Not used up before reset**. Hovering a cell shows both rates, their time range and the method. Estimates are read from the manager's snapshot interface; opening the forecast never refreshes the estimates or writes to the database.
+
+### Fixed key simulation
+
+Choose a pool and add hypothetical fixed keys (weekly amount, optional 5-hour share, weekly usage defaulting to the whole amount), or change or remove existing fixed keys' amounts. The retained request history (at most 365 days) is replayed hour by hour:
+
+- Each pooled key's hourly cost comes from the request records, converted to the quota basis when model multipliers are on. The pool's remaining capacity comes from each account's last utilization reading of the hour (so outside usage counts as it happened), moved by the use the scenario adds or removes; account totals and k are the current estimates.
+- Cycles follow the anchor account's 7-day resets found in its reports (an early reset shortens a cycle); where none is known, they step back 7 days from the current reset.
+- The result shows, per cycle, the hours remainder keys would be refused (weekly or 5-hour reservation), the spend not admitted (what remainder keys actually spent in those hours), the hours in which fixed keys' reservations exceeded the pool's remaining capacity (oversold), the largest shortfall and the oversold periods, side by side with an unchanged replay.
+- It is approximate, and the page lists where: totals from the current estimates, outside usage taken from the readings, hourly steps, new keys spread over the pool's own hourly spend, an incomplete first cycle and so on. The simulation only reads: nothing is stored and no setting changes.
+
+### Key usage
+
+Each pool has a daily chart of its keys' cost (stacked bars at billed prices), with remainder keys' CC refusals of the day as dashed lines on the right axis (the tooltip splits them by reason). Fixed keys also get a chart by plan cycle: what each cycle used and forfeited (weekly amount − used, settled when the cycle ends; a running cycle shows what is left, not forfeited). Days follow the browser's time zone, and the range switches between 7, 14 and 30 days and everything.
+
+Refusals are counted by key, hour and reason in the `cc_block_counts` table (CC table format version 4). Admission runs on the request path, so it only adds to memory; the counts are written in one transaction by the next estimate refresh or when the usage charts are opened. Plugin log lines stay deduplicated as before: one per key, reason and window.
+
+`GET /cc/forecast`, `POST /cc/simulate` and `GET /cc/key-usage` are management-only.
 
 ### Auth files page
 

@@ -544,6 +544,9 @@ func ccTables(t *testing.T, app *App) string {
 			`SELECT auth_index, bucket_at, gain_5h, gain_7d, '' FROM cc_k_buckets ORDER BY auth_index, bucket_at`,
 			`SELECT auth_index, state_json, '', '', '' FROM cc_streams ORDER BY auth_index`,
 			`SELECT key, value, '', '', '' FROM cc_meta ORDER BY key`,
+			`SELECT segment_id, model, cost_usd, '', '' FROM cc_segment_costs ORDER BY segment_id, model`,
+			`SELECT id, item_json, auth_index, started_at, ended_at || result_json FROM cc_calibrations ORDER BY id`,
+			`SELECT scope, hour_at, reason, count, '' FROM cc_block_counts ORDER BY scope, hour_at, reason`,
 		} {
 			rows, err := db.Query(query)
 			if err != nil {
@@ -618,5 +621,63 @@ func TestCCTrendReadsStoredDataWithoutRefreshing(t *testing.T) {
 		if resp.StatusCode != http.StatusNotFound || bytes.Contains(resp.Body, []byte("gain_7d")) {
 			t.Fatalf("API key trend = %d %s", resp.StatusCode, resp.Body)
 		}
+	}
+}
+
+func TestCCQuotaWeightEndpoints(t *testing.T) {
+	app, clock := newCCTestApp(t)
+	reset5h, reset7d := clock.now.Add(4*time.Hour), clock.now.Add(5*24*time.Hour)
+	for i := range 12 {
+		ccUsage(t, app, ccRemainderKey, 0.4, float64(i), float64(i)/8, reset5h, reset7d)
+		clock.now = clock.now.Add(time.Minute)
+	}
+	clock.now = clock.now.Add(time.Hour)
+	var current struct {
+		CC ccbilling.View `json:"cc"`
+	}
+	callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, &current)
+	settings := current.CC.Settings
+	settings.Weights.Items = []ccbilling.WeightItem{{ID: "test", Name: "Test", Models: []string{strings.ToUpper(ccModel)}}}
+	callOK(t, app, http.MethodPut, routeCCConfig, nil, settings, http.StatusOK, nil)
+
+	var view struct {
+		CC     ccbilling.View                     `json:"cc"`
+		Prices map[string]billing.PriceMultiplier `json:"price_multipliers"`
+	}
+	callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, &view)
+	weights := view.CC.Weights
+	if len(weights.Models) != 1 || weights.Models[0].Model != ccModel || weights.Models[0].ItemID != "test" || weights.UnsplitSegments != 0 {
+		t.Fatalf("weights = %+v", weights)
+	}
+	if len(weights.Effective) != 1 || weights.Effective[0].Source != ccbilling.WeightSourceDefault || weights.Estimate.Items[0].Status != ccbilling.WeightInsufficient {
+		t.Fatalf("weights = %+v", weights)
+	}
+	// The test model has a custom price but no official one to compare with.
+	if price := view.Prices[ccModel]; !price.Custom || price.Input != 0 {
+		t.Fatalf("prices = %+v", view.Prices)
+	}
+
+	resp := callManagement(t, app, http.MethodPost, routeCCCalib, nil, map[string]string{"item_id": "missing", "auth_index": ccAuth})
+	if resp.StatusCode != http.StatusBadRequest || !bytes.Contains(resp.Body, []byte("backend.cc_test_item_value_does_not_exist")) {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, resp.Body)
+	}
+	var started struct {
+		Calibration ccbilling.Calibration `json:"calibration"`
+	}
+	callOK(t, app, http.MethodPost, routeCCCalib, nil, map[string]string{"item_id": "test", "auth_index": ccAuth}, http.StatusOK, &started)
+	if started.Calibration.ID == 0 || started.Calibration.Item.Name != "Test" {
+		t.Fatalf("calibration = %+v", started.Calibration)
+	}
+	callOK(t, app, http.MethodPost, routeCCStop, nil, map[string]int64{"id": started.Calibration.ID}, http.StatusOK, nil)
+	callOK(t, app, http.MethodPost, routeCCStop, nil, map[string]int64{"id": started.Calibration.ID}, http.StatusNotFound, nil)
+	callOK(t, app, http.MethodDelete, routeCCCalib, url.Values{"id": {strconv.FormatInt(started.Calibration.ID, 10)}}, nil, http.StatusOK, nil)
+	callOK(t, app, http.MethodDelete, routeCCCalib, url.Values{"id": {"x"}}, nil, http.StatusBadRequest, nil)
+
+	var estimates struct {
+		Estimates ccbilling.Estimates `json:"estimates"`
+	}
+	callOK(t, app, http.MethodGet, routeCCEstim, nil, nil, http.StatusOK, &estimates)
+	if estimates.Estimates.Basis != ccbilling.BasisRaw || len(estimates.Estimates.Accounts) != 1 || len(estimates.Estimates.Weights) != 1 {
+		t.Fatalf("estimates = %+v", estimates.Estimates)
 	}
 }

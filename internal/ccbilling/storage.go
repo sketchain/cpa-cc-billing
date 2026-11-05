@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -12,7 +13,7 @@ import (
 // versioned separately in cc_meta, so the billing schema version and its
 // migrations stay exactly those of upstream cpa-key-billing: a database copied
 // from cpa-key-billing opens unchanged and gains these tables on first use.
-const ccSchemaVersion = 2
+const ccSchemaVersion = 4
 
 var ccMigrations = []string{
 	// Version 1.
@@ -39,6 +40,32 @@ var ccMigrations = []string{
 		gain_7d    REAL    NOT NULL,
 		PRIMARY KEY (auth_index, bucket_at)
 	) WITHOUT ROWID;`,
+	// Version 3: each segment's cost by billing model, and calibration runs
+	// of the quota weights. Segments of version 2 keep no split; a rebuild
+	// recreates them, with their split, from the retained request history.
+	`CREATE TABLE IF NOT EXISTS cc_segment_costs (
+		segment_id INTEGER NOT NULL,
+		model      TEXT    NOT NULL,
+		cost_usd   REAL    NOT NULL,
+		PRIMARY KEY (segment_id, model)
+	) WITHOUT ROWID;
+	CREATE TABLE IF NOT EXISTS cc_calibrations (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		item_json   TEXT    NOT NULL,
+		auth_index  TEXT    NOT NULL,
+		started_at  INTEGER NOT NULL,
+		ended_at    INTEGER NOT NULL DEFAULT 0,
+		result_json TEXT    NOT NULL DEFAULT ''
+	);`,
+	// Version 4: remainder keys' CC refusals counted by key, hour and reason.
+	`CREATE TABLE IF NOT EXISTS cc_block_counts (
+		scope   TEXT    NOT NULL,
+		hour_at INTEGER NOT NULL,
+		reason  TEXT    NOT NULL,
+		count   INTEGER NOT NULL,
+		PRIMARY KEY (scope, hour_at, reason)
+	) WITHOUT ROWID;
+	CREATE INDEX IF NOT EXISTS cc_block_counts_hour ON cc_block_counts(hour_at);`,
 }
 
 const (
@@ -166,23 +193,54 @@ func loadStream(db *sql.DB, authIndex string) (StreamState, error) {
 }
 
 func loadSegments(db *sql.DB, authIndex string, since time.Time) ([]Segment, error) {
-	rows, err := db.Query(`SELECT block_at, at, cost_usd, gain FROM cc_segments WHERE auth_index = ? AND at >= ? ORDER BY at, id`,
+	rows, err := db.Query(`SELECT id, block_at, at, cost_usd, gain FROM cc_segments WHERE auth_index = ? AND at >= ? ORDER BY at, id`,
 		authIndex, nanos(since))
 	if err != nil {
 		return nil, fmt.Errorf("Read CC segments: %w", err)
 	}
-	defer rows.Close()
 	var segments []Segment
+	positions := map[int64]int{}
 	for rows.Next() {
-		var block, at int64
+		var id, block, at int64
 		var segment Segment
-		if err := rows.Scan(&block, &at, &segment.CostUSD, &segment.Gain); err != nil {
+		if err := rows.Scan(&id, &block, &at, &segment.CostUSD, &segment.Gain); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("Read CC segments: %w", err)
 		}
 		segment.Block, segment.At = timeAt(block), timeAt(at)
+		positions[id] = len(segments)
 		segments = append(segments, segment)
 	}
-	return segments, rows.Err()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, fmt.Errorf("Read CC segments: %w", err)
+	}
+	if len(segments) == 0 {
+		return segments, nil
+	}
+	costs, err := db.Query(`SELECT c.segment_id, c.model, c.cost_usd FROM cc_segment_costs c JOIN cc_segments s ON s.id = c.segment_id
+		WHERE s.auth_index = ? AND s.at >= ?`, authIndex, nanos(since))
+	if err != nil {
+		return nil, fmt.Errorf("Read CC segment models: %w", err)
+	}
+	defer costs.Close()
+	for costs.Next() {
+		var id int64
+		var model string
+		var cost float64
+		if err := costs.Scan(&id, &model, &cost); err != nil {
+			return nil, fmt.Errorf("Read CC segment models: %w", err)
+		}
+		if position, ok := positions[id]; ok {
+			segment := &segments[position]
+			if segment.Models == nil {
+				segment.Models = map[string]float64{}
+			}
+			segment.Models[model] = cost
+		}
+	}
+	return segments, costs.Err()
 }
 
 // commitAdvance stores an account's new segments with the stream position
@@ -194,9 +252,23 @@ func commitAdvance(db *sql.DB, authIndex string, state StreamState, segments []S
 	}
 	return transact(db, func(tx *sql.Tx) error {
 		for _, segment := range segments {
-			if _, err := tx.Exec(`INSERT INTO cc_segments (auth_index, block_at, at, cost_usd, gain) VALUES (?, ?, ?, ?, ?)`,
-				authIndex, nanos(segment.Block), nanos(segment.At), segment.CostUSD, segment.Gain); err != nil {
+			result, err := tx.Exec(`INSERT INTO cc_segments (auth_index, block_at, at, cost_usd, gain) VALUES (?, ?, ?, ?, ?)`,
+				authIndex, nanos(segment.Block), nanos(segment.At), segment.CostUSD, segment.Gain)
+			if err != nil {
 				return fmt.Errorf("Save CC segments: %w", err)
+			}
+			if len(segment.Models) == 0 {
+				continue
+			}
+			id, err := result.LastInsertId()
+			if err != nil {
+				return fmt.Errorf("Save CC segments: %w", err)
+			}
+			for _, model := range sortedKeys(segment.Models) {
+				if _, err := tx.Exec(`INSERT INTO cc_segment_costs (segment_id, model, cost_usd) VALUES (?, ?, ?)`,
+					id, model, segment.Models[model]); err != nil {
+					return fmt.Errorf("Save CC segment models: %w", err)
+				}
 			}
 		}
 		for _, bucket := range buckets {
@@ -215,10 +287,18 @@ func commitAdvance(db *sql.DB, authIndex string, state StreamState, segments []S
 }
 
 func pruneSegments(db *sql.DB, before time.Time) error {
-	if _, err := db.Exec(`DELETE FROM cc_segments WHERE at < ?; DELETE FROM cc_k_buckets WHERE bucket_at < ?`, nanos(before), nanos(before)); err != nil {
-		return fmt.Errorf("Prune CC segments: %w", err)
-	}
-	return nil
+	return transact(db, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`DELETE FROM cc_segment_costs WHERE segment_id IN (SELECT id FROM cc_segments WHERE at < ?)`, nanos(before)); err != nil {
+			return fmt.Errorf("Prune CC segments: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM cc_segments WHERE at < ?; DELETE FROM cc_k_buckets WHERE bucket_at < ?`, nanos(before), nanos(before)); err != nil {
+			return fmt.Errorf("Prune CC segments: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM cc_block_counts WHERE hour_at < ?`, nanos(before)); err != nil {
+			return fmt.Errorf("Prune CC refusal counts: %w", err)
+		}
+		return nil
+	})
 }
 
 func loadKBuckets(db *sql.DB, authIndex string, since time.Time) ([]KBucket, error) {
@@ -245,7 +325,7 @@ func loadKBuckets(db *sql.DB, authIndex string, since time.Time) ([]KBucket, err
 // rebuilds them from the retained request history.
 func resetStreams(db *sql.DB) error {
 	return transact(db, func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`DELETE FROM cc_segments; DELETE FROM cc_streams; DELETE FROM cc_k_buckets;`); err != nil {
+		if _, err := tx.Exec(`DELETE FROM cc_segment_costs; DELETE FROM cc_segments; DELETE FROM cc_streams; DELETE FROM cc_k_buckets;`); err != nil {
 			return fmt.Errorf("Reset CC segments: %w", err)
 		}
 		return nil
@@ -291,7 +371,8 @@ const maxRequestDuration = 2 * time.Hour
 // readCosts returns the costs of an account's requests completed after from
 // and no later than to, in USD.
 func readCosts(db *sql.DB, authIndex string, from, to time.Time, toUSD func(float64, string) float64) ([]CostEvent, error) {
-	rows, err := db.Query(`SELECT at, latency_ms, total_cost, currency FROM request_events
+	rows, err := db.Query(`SELECT at, latency_ms, total_cost, currency,
+		CASE WHEN billing_model <> '' THEN billing_model ELSE upstream_model END FROM request_events
 		WHERE auth_index = ? AND at > ? AND at <= ? ORDER BY at, id`,
 		authIndex, nanos(from.Add(-maxRequestDuration)), nanos(to))
 	if err != nil {
@@ -302,17 +383,20 @@ func readCosts(db *sql.DB, authIndex string, from, to time.Time, toUSD func(floa
 	for rows.Next() {
 		var at, latency int64
 		var cost float64
-		var currency string
-		if err := rows.Scan(&at, &latency, &cost, &currency); err != nil {
+		var currency, model string
+		if err := rows.Scan(&at, &latency, &cost, &currency, &model); err != nil {
 			return nil, fmt.Errorf("Read request costs: %w", err)
 		}
 		completed := timeAt(at).Add(time.Duration(max(latency, 0)) * time.Millisecond)
 		if completed.After(from) && !completed.After(to) {
-			costs = append(costs, CostEvent{At: completed, USD: toUSD(cost, currency)})
+			costs = append(costs, CostEvent{At: completed, USD: toUSD(cost, currency), Model: NormalizeModel(model)})
 		}
 	}
 	return costs, rows.Err()
 }
+
+// NormalizeModel is the form model names are compared in.
+func NormalizeModel(model string) string { return strings.ToLower(strings.TrimSpace(model)) }
 
 func segmentStats(db *sql.DB) (int, error) {
 	var count int

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -27,6 +28,12 @@ const (
 	routeCCRefresh = "/cc/refresh"
 	routeCCRebuild = "/cc/rebuild"
 	routeCCTrend   = "/cc/trend"
+	routeCCCalib   = "/cc/calibrations"
+	routeCCStop    = "/cc/calibrations/stop"
+	routeCCEstim   = "/cc/estimates"
+	routeCCFore    = "/cc/forecast"
+	routeCCSim     = "/cc/simulate"
+	routeCCUsage   = "/cc/key-usage"
 	routeBalance   = "/balance"
 	routePriceJSON = "/prices/import"
 	routePanel     = "/panel-settings"
@@ -41,6 +48,13 @@ func init() {
 		managementEndpoint{http.MethodPost, routeCCRefresh, "Process new usage into CC estimates", (*App).ccRefresh},
 		managementEndpoint{http.MethodGet, routeCCTrend, "View a CC account's retained hourly k evidence and 1% segments", (*App).ccTrend},
 		managementEndpoint{http.MethodPost, routeCCRebuild, "Rebuild CC segments from the retained request history", (*App).ccRebuild},
+		managementEndpoint{http.MethodPost, routeCCCalib, "Start calibrating a model's CC quota weight on an account", (*App).ccStartCalibration},
+		managementEndpoint{http.MethodPost, routeCCStop, "End a running CC quota weight calibration", (*App).ccStopCalibration},
+		managementEndpoint{http.MethodDelete, routeCCCalib, "Delete a CC quota weight calibration", (*App).ccDeleteCalibration},
+		managementEndpoint{http.MethodGet, routeCCEstim, "View the CC estimates on the basis in effect", (*App).ccEstimates},
+		managementEndpoint{http.MethodGet, routeCCFore, "Forecast when CC accounts and pools run out at the recent rate", (*App).ccForecast},
+		managementEndpoint{http.MethodPost, routeCCSim, "Simulate a CC pool's history with fixed keys added, changed or removed (read only)", (*App).ccSimulate},
+		managementEndpoint{http.MethodGet, routeCCUsage, "View each pooled key's daily usage, fixed key cycles and CC refusals", (*App).ccKeyUsage},
 		managementEndpoint{http.MethodPost, routePriceJSON, "Import custom model prices from a JSON price list", (*App).importPriceList},
 		managementEndpoint{http.MethodGet, routePanel, "View the page display and API key self-service settings", (*App).panelSettings},
 		managementEndpoint{http.MethodPut, routePanel, "Update the page display and API key self-service settings", (*App).putPanelSettings},
@@ -323,7 +337,189 @@ func (a *App) ccView(_ ManagementRequest) ManagementResponse {
 		}
 		keys = append(keys, option)
 	}
-	return JSONResponse(http.StatusOK, map[string]any{"cc": view, "credentials": credentials, "key_options": keys, "credential_warning": warning})
+	var models []string
+	for _, item := range view.Settings.Weights.Items {
+		models = append(models, item.Models...)
+	}
+	prices := map[string]billing.PriceMultiplier{}
+	var priceWarning string
+	if len(models) > 0 {
+		if prices, err = a.store.PriceMultipliers(models); err != nil {
+			prices, priceWarning = map[string]billing.PriceMultiplier{}, err.Error()
+		}
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"cc": view, "credentials": credentials, "key_options": keys, "credential_warning": warning,
+		"price_multipliers": prices, "price_warning": priceWarning})
+}
+
+// ccCalibrationError maps a calibration error to its response.
+func ccCalibrationError(err error) ManagementResponse {
+	switch {
+	case ccbilling.IsInvalid(err):
+		return jsonMessageError(http.StatusBadRequest, "invalid", messages.FromError(err))
+	case ccbilling.IsCalibrationNotFound(err):
+		return JSONError(http.StatusNotFound, "not_found", "The calibration does not exist or has already ended")
+	}
+	return errorResponse(err)
+}
+
+func (a *App) ccStartCalibration(req ManagementRequest) ManagementResponse {
+	var body struct {
+		ItemID    string `json:"item_id"`
+		AuthIndex string `json:"auth_index"`
+	}
+	if err := decodeStrict(req.Body, &body); err != nil {
+		return errorResponse(err)
+	}
+	calibration, err := a.cc.StartCalibration(strings.TrimSpace(body.ItemID), strings.TrimSpace(body.AuthIndex))
+	if err != nil {
+		return ccCalibrationError(err)
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"calibration": calibration})
+}
+
+func (a *App) ccStopCalibration(req ManagementRequest) ManagementResponse {
+	var body struct {
+		ID int64 `json:"id"`
+	}
+	if err := decodeStrict(req.Body, &body); err != nil {
+		return errorResponse(err)
+	}
+	if err := a.cc.StopCalibration(body.ID); err != nil {
+		return ccCalibrationError(err)
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"stopped": true})
+}
+
+func (a *App) ccDeleteCalibration(req ManagementRequest) ManagementResponse {
+	id, err := strconv.ParseInt(strings.TrimSpace(req.Query.Get("id")), 10, 64)
+	if err != nil || id <= 0 {
+		return JSONError(http.StatusBadRequest, "invalid", "id must be a calibration ID")
+	}
+	if err := a.cc.DeleteCalibration(id); err != nil {
+		return ccCalibrationError(err)
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"deleted": true})
+}
+
+// ccNotReady answers a read that needs the first estimate snapshot.
+func ccNotReady() ManagementResponse {
+	response := JSONError(http.StatusServiceUnavailable, "not_ready", "CC estimates are still loading; retry shortly")
+	response.Headers.Set("Retry-After", "60")
+	return response
+}
+
+// ccInsightError maps an error of the forecast, simulation or key usage.
+func ccInsightError(err error) ManagementResponse {
+	switch {
+	case ccbilling.IsNotLoaded(err):
+		return ccNotReady()
+	case ccbilling.IsInvalid(err):
+		return jsonMessageError(http.StatusBadRequest, "invalid", messages.FromError(err))
+	}
+	return errorResponse(err)
+}
+
+// ccPriceMultipliers returns, for the models under test, the price table
+// multiplier of those with a custom price whose input and output multipliers
+// agree: the conversion of key cost checks whether it already carries the
+// quota multiplier. Models without one are left out.
+func (a *App) ccPriceMultipliers() map[string]float64 {
+	estimates, ok := a.cc.Estimates()
+	result := map[string]float64{}
+	if !ok || estimates.Basis != ccbilling.BasisWeighted {
+		return result
+	}
+	var models []string
+	for _, weight := range estimates.Weights {
+		models = append(models, weight.Models...)
+	}
+	if len(models) == 0 {
+		return result
+	}
+	prices, err := a.store.PriceMultipliers(models)
+	if err != nil {
+		a.store.AddPluginLog(billing.PluginLogError, "CC could not read price multipliers; key costs are converted with every quota multiplier: %v", err)
+		return result
+	}
+	for model, price := range prices {
+		if price.Custom && price.Input > 0 && math.Abs(price.Input-price.Output) <= 1e-9*math.Max(price.Input, price.Output) {
+			result[model] = price.Input
+		}
+	}
+	return result
+}
+
+// ccRetainedFrom is where the retained request history begins.
+func (a *App) ccRetainedFrom() time.Time {
+	days := a.store.Config().RequestEventRetentionDays
+	return a.store.Now().Add(-time.Duration(days) * 24 * time.Hour)
+}
+
+// ccDuration reads a whole-number query parameter in unit, within limits.
+func ccDuration(req ManagementRequest, name string, unit, fallback, low, high time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(req.Query.Get(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	duration := time.Duration(value) * unit
+	if err != nil || duration < low || duration > high {
+		return 0, fmt.Errorf("%s must be a whole number from %d to %d", name, low/unit, high/unit)
+	}
+	return duration, nil
+}
+
+// ccForecast projects each pool and account at the recent consumption rate.
+func (a *App) ccForecast(req ManagementRequest) ManagementResponse {
+	window5h, err := ccDuration(req, "window_5h_minutes", time.Minute, ccbilling.DefaultForecastWindow5h,
+		ccbilling.MinForecastWindow5h, ccbilling.MaxForecastWindow5h)
+	if err != nil {
+		return JSONError(http.StatusBadRequest, "invalid", err.Error())
+	}
+	window7d, err := ccDuration(req, "window_7d_hours", time.Hour, ccbilling.DefaultForecastWindow7d,
+		ccbilling.MinForecastWindow7d, ccbilling.MaxForecastWindow7d)
+	if err != nil {
+		return JSONError(http.StatusBadRequest, "invalid", err.Error())
+	}
+	forecast, err := a.cc.Forecast(ccbilling.ForecastOptions{Window5h: window5h, Window7d: window7d, Prices: a.ccPriceMultipliers()})
+	if err != nil {
+		return ccInsightError(err)
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"forecast": forecast})
+}
+
+// ccSimulate replays a pool's history with hypothetical fixed keys. It
+// changes neither the settings nor the database.
+func (a *App) ccSimulate(req ManagementRequest) ManagementResponse {
+	var request ccbilling.SimRequest
+	if err := decodeStrict(req.Body, &request); err != nil {
+		return errorResponse(err)
+	}
+	result, err := a.cc.Simulate(request, ccbilling.SimOptions{RetainedFrom: a.ccRetainedFrom(), Prices: a.ccPriceMultipliers()})
+	if err != nil {
+		return ccInsightError(err)
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"simulation": result})
+}
+
+// ccKeyUsage returns each pooled key's hourly cost, refusals and cycles.
+func (a *App) ccKeyUsage(_ ManagementRequest) ManagementResponse {
+	usage, err := a.cc.KeyUsage(a.ccRetainedFrom())
+	if err != nil {
+		return ccInsightError(err)
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"usage": usage})
+}
+
+// ccEstimates returns the latest estimates on the basis in effect, the same
+// values later features read through the manager. It never refreshes.
+func (a *App) ccEstimates(_ ManagementRequest) ManagementResponse {
+	estimates, ok := a.cc.Estimates()
+	if !ok {
+		return ccNotReady()
+	}
+	return JSONResponse(http.StatusOK, map[string]any{"estimates": estimates})
 }
 
 func (a *App) ccPutSettings(req ManagementRequest) ManagementResponse {
@@ -533,6 +729,8 @@ type ccBlockLog struct {
 // window, with the estimate that decided it.
 func (a *App) ccReportBlock(scope string, decision ccbilling.Decision) {
 	now := a.store.Now()
+	// Every refusal is counted, in memory; only the log line is deduplicated.
+	a.cc.RecordBlock(scope, decision.Reason, now)
 	signature := scope + "\x00" + decision.Reason + "\x00" + decision.RetryAt.UTC().Format(time.RFC3339)
 	if decision.Reason == ccbilling.RefusedNotLoaded {
 		// Its retry time moves with every request; one line per load is enough.
