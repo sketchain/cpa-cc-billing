@@ -45,7 +45,7 @@ jobs:
             arch: amd64
             extension: dylib
           - target: darwin-arm64
-            runner: macos-15
+            runner: macos-latest
             os: darwin
             arch: arm64
             extension: dylib
