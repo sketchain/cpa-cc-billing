@@ -156,11 +156,11 @@ func (h *ccHost) KeyInfo(scope string) (ccbilling.KeyInfo, bool) {
 		return ccbilling.KeyInfo{Seq: seq}, false
 	}
 	info := ccbilling.KeyInfo{Preview: view.Preview, Label: view.Label, PlanID: view.PlanID, Seq: seq}
-	for _, plan := range h.app.store.Plans() {
-		if plan.ID == view.PlanID {
-			revision, _ := json.Marshal(plan)
-			info.PlanRevision = string(revision)
-		}
+	if plan, found := h.app.store.PlanByID(view.PlanID); found {
+		// Only the plan's configuration: its pool cycles and quota view change
+		// with every request and would invalidate the alignment cache.
+		revision, _ := json.Marshal(plan)
+		info.PlanRevision = string(revision)
 	}
 	rate := h.app.store.Config().CNYPerUSD
 	for _, window := range view.Windows {

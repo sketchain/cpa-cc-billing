@@ -126,6 +126,19 @@ func (s *Store) AlignWindowAnchor(planID string, periodSeconds int64, resetAt ti
 	return result, err
 }
 
+// PlanByID returns a copy of a subscription plan. It only reads, so hot paths
+// may call it; unlike PlanViews it never settles or saves shared pool cycles.
+func (s *Store) PlanByID(id string) (Plan, bool) {
+	var plan Plan
+	found := false
+	s.read(func(state *State) {
+		if current := state.FindPlan(id); current != nil {
+			plan, found = clonePlan(*current), true
+		}
+	})
+	return plan, found
+}
+
 // SetClock replaces the store's clock; tests outside this package use it.
 func (s *Store) SetClock(now func() time.Time) { s.now = now }
 
@@ -169,11 +182,9 @@ func (s *Store) KeyViewForScopeAt(scope string) (KeyView, bool, uint64) {
 			return result{seq: s.usageSeq}, Changes{}
 		}
 		now := s.Now()
-		changed := Changes{}
-		if settleExpiredCycles(key, now) {
-			changed.Keys = []string{scope}
-		}
-		return result{view: s.keyView(state, scope, key, now), ok: true, seq: s.usageSeq}, changed
+		plan := state.FindPlan(key.PlanID)
+		changed := settleQuota(scope, key, plan, now)
+		return result{view: s.keyView(state, scope, key, plan, now), ok: true, seq: s.usageSeq}, changed
 	})
 	return current.view, current.ok, current.seq
 }

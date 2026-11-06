@@ -249,8 +249,8 @@ func TestCCFixedKeyCycleFollowsAccountAndSurvivesEarlyReset(t *testing.T) {
 	if response := ccAdmit(t, app, ccFixedKey); response.Terminate {
 		t.Fatalf("fixed key refused: %s", response.ResponseBody)
 	}
-	plans := app.store.Plans()
-	if anchor := plans[0].Windows[0].CycleAnchorAt; !anchor.Equal(reset7d) {
+	plan, _ := app.store.PlanByID("fixed-a")
+	if anchor := plan.Windows[0].CycleAnchorAt; !anchor.Equal(reset7d) {
 		t.Fatalf("anchor = %v, want %v", anchor, reset7d)
 	}
 	window := weeklyWindow(t, app, scope)
@@ -679,5 +679,51 @@ func TestCCQuotaWeightEndpoints(t *testing.T) {
 	callOK(t, app, http.MethodGet, routeCCEstim, nil, nil, http.StatusOK, &estimates)
 	if estimates.Estimates.Basis != ccbilling.BasisRaw || len(estimates.Estimates.Accounts) != 1 || len(estimates.Estimates.Weights) != 1 {
 		t.Fatalf("estimates = %+v", estimates.Estimates)
+	}
+}
+
+// The plan revision covers the plan's configuration only: requests change its
+// pool cycles and quota view, not the revision the alignment cache keys on.
+func TestCCKeyInfoPlanRevisionIgnoresUsage(t *testing.T) {
+	app, clock := newCCTestApp(t)
+	host := &ccHost{app: app}
+	scope := billing.CallerScope(ccRemainderKey)
+	if _, err := app.store.CreatePlanWithBindings(billing.Plan{ID: "pool", Name: "Pool", Windows: []billing.QuotaWindow{
+		{Name: "Week", PeriodSeconds: weekSeconds, Amount: 100, CycleAnchorAt: clock.now.Add(3 * 24 * time.Hour)},
+	}}, []string{scope}); err != nil {
+		t.Fatal(err)
+	}
+	revision := func() string {
+		t.Helper()
+		info, ok := host.KeyInfo(scope)
+		if !ok || info.PlanID != "pool" || info.PlanRevision == "" {
+			t.Fatalf("key info = %+v, %v", info, ok)
+		}
+		return info.PlanRevision
+	}
+	before := revision()
+	shared := true
+	if _, err := app.store.UpdatePlanWithBindings(billing.PlanPatch{ID: "pool", SharedQuota: &shared}, nil); err != nil {
+		t.Fatal(err)
+	}
+	sharedRevision := revision()
+	if sharedRevision == before {
+		t.Fatal("switching the plan to a shared quota kept its revision")
+	}
+	if decision := app.store.Authorize(scope, clock.now); !decision.Allowed {
+		t.Fatalf("admission = %+v", decision)
+	}
+	ccUsage(t, app, ccRemainderKey, 2, 0.1, 0.2, clock.now.Add(time.Hour), clock.now.Add(3*24*time.Hour))
+	clock.now = clock.now.Add(time.Minute)
+	if after := revision(); after != sharedRevision {
+		t.Fatalf("usage changed the plan revision:\n%s\n%s", sharedRevision, after)
+	}
+	plan, _ := app.store.PlanByID("pool")
+	spent := 0.0
+	for _, cycle := range plan.Cycles {
+		spent += cycle.Spending.USD
+	}
+	if len(plan.Cycles) != 1 || spent <= 0 {
+		t.Fatalf("the shared pool did not record the usage: %+v", plan.Cycles)
 	}
 }
