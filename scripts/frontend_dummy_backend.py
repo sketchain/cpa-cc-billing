@@ -1925,6 +1925,40 @@ def cc_auth_summaries():
 CC_LOADED = [True]
 
 
+def cc_fixed_scope(scope):
+    return CC_SETTINGS.get("keys", {}).get(scope, {}).get("kind") == "fixed"
+
+
+def plan_is_shared(plan_id):
+    return any(plan["id"] == plan_id and plan.get("shared_quota") for plan in PLANS)
+
+
+def key_preview(scope):
+    return next((key["preview"] for key in KEYS if key["scope"] == scope), scope)
+
+
+def cc_shared_plan_conflict(plan_id, shared, scopes):
+    """Mirrors the plugin: a CC fixed key may not sit on a shared quota plan."""
+    if not shared:
+        return None
+    for scope in scopes:
+        if cc_fixed_scope(scope):
+            return {"error": {"code": "conflict",
+                              "message": f"Subscription plan {json.dumps(plan_id)} cannot share quota while CC fixed key {key_preview(scope)} is bound to it; give the fixed key a plan without shared quota",
+                              "message_key": "backend.cc_shared_plan_has_fixed_key",
+                              "message_params": {"v0": json.dumps(plan_id), "v1": key_preview(scope)}}}
+    return None
+
+
+def cc_shared_plan_warnings():
+    warnings = []
+    for key in LIVE_KEYS:
+        if cc_fixed_scope(key["scope"]) and plan_is_shared(key["plan_id"]):
+            warnings.append({"message_key": "backend.cc_fixed_key_shared_plan_warning",
+                             "message_params": {"v0": key["preview"], "v1": json.dumps(key["plan_id"])}})
+    return warnings
+
+
 def cc_payload():
     blocks = [{"start": iso(NOW - timedelta(hours=6 * index + 2)), "end": iso(NOW - timedelta(hours=6 * index)), "segments": 40 - index,
                "excluded": index % 3, "gain": 40 - index, "cost_usd": 18 - index * 0.2, "clean_gain": 40 - index - index % 3,
@@ -1972,10 +2006,12 @@ def cc_payload():
         empty = {"basis": "raw", "estimate": {"items": []}, "effective": [], "calibrations": [], "models": [], "comparison": [],
                  "unsplit_segments": 0, "segments": 0}
         return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "accounts": [], "pools": [], "keys": [],
-                       "stored_segments": 0, "weights": empty, "at": iso(NOW), "loaded": False, "error": "database is locked"},
+                       "stored_segments": 0, "weights": empty, "at": iso(NOW), "loaded": False, "error": "database is locked",
+                       "warnings": cc_shared_plan_warnings()},
                 "credentials": credentials, "key_options": options, "credential_warning": "", "price_multipliers": {}, "price_warning": ""}
     return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "accounts": accounts, "pools": pools, "keys": keys,
-                   "stored_segments": 1180, "weights": cc_weights_view(accounts), "at": iso(NOW), "loaded": True},
+                   "stored_segments": 1180, "weights": cc_weights_view(accounts), "at": iso(NOW), "loaded": True,
+                   "warnings": cc_shared_plan_warnings()},
             "credentials": credentials, "key_options": options, "credential_warning": "", "price_multipliers": CC_PRICE_MULTIPLIERS,
             "price_warning": ""}
 
@@ -2499,8 +2535,17 @@ class Handler(BaseHTTPRequestHandler):
                                   account_self_service=bool(body.get("account_self_service")))
             self.send_json(200, {"settings": PANEL_SETTINGS, "tabs": PANEL_TABS})
         elif route == ("PUT", f"{API_BASE}/cc/settings"):
+            body = json.loads(request_body or b"{}")
+            shared = next((key for key in LIVE_KEYS if body.get("keys", {}).get(key["scope"], {}).get("kind") == "fixed"
+                           and plan_is_shared(key["plan_id"])), None)
+            if shared is not None:
+                self.send_json(400, {"error": {"code": "invalid",
+                                               "message": f"CC fixed key {shared['preview']} is bound to shared quota plan {json.dumps(shared['plan_id'])}; give it a plan without shared quota",
+                                               "message_key": "backend.cc_fixed_key_on_shared_plan",
+                                               "message_params": {"v0": shared["preview"], "v1": json.dumps(shared["plan_id"])}}})
+                return
             CC_SETTINGS.clear()
-            CC_SETTINGS.update(json.loads(request_body or b"{}"))
+            CC_SETTINGS.update(body)
             self.send_json(200, {"settings": CC_SETTINGS})
         elif route == ("POST", f"{API_BASE}/cc/simulate"):
             self.send_json(*cc_simulate_payload(json.loads(request_body or b"{}")))
@@ -2749,6 +2794,14 @@ class Handler(BaseHTTPRequestHandler):
             if stored is None:
                 self.send_json(404, {"error": {"message": "dummy backend: plan not found"}})
                 return
+            members = body["scopes"] if "scopes" in body else [key["scope"] for key in LIVE_KEYS if key["plan_id"] == plan_id]
+            conflict = cc_shared_plan_conflict(plan_id if self.command == "PATCH" else body.get("name") or plan_id,
+                                               body.get("shared_quota", stored.get("shared_quota", False)), members)
+            if conflict:
+                if self.command == "POST":
+                    PLANS.remove(stored)
+                self.send_json(409, conflict)
+                return
             old = json.loads(json.dumps(stored))
             stored.update({key: body[key] for key in ("name", "currency", "windows", "shared_quota") if key in body})
             for index, window in enumerate(stored["windows"]):
@@ -2804,6 +2857,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"deleted": plan_id})
         elif route in {("POST", f"{API_BASE}/keys/bind"), ("POST", f"{API_BASE}/keys/unbind")}:
             body = json.loads(request_body or b"{}")
+            conflict = cc_shared_plan_conflict(body.get("plan_id", ""), plan_is_shared(body.get("plan_id", "")), [body.get("scope", "")])
+            if conflict:
+                self.send_json(409, conflict)
+                return
             for key in KEYS:
                 if key["scope"] == body.get("scope"):
                     plan_id = body.get("plan_id", "")
@@ -2847,6 +2904,11 @@ def main():
         help="Preview the CC page while its estimates have not loaded.",
     )
     parser.add_argument(
+        "--cc-fixed-key-on-shared-plan",
+        action="store_true",
+        help="Preview a CC fixed key left on a shared quota plan by older settings.",
+    )
+    parser.add_argument(
         "--allow-api-key-quota-reset",
         action="store_true",
         help="Allow API key users to reset Codex auth file quotas.",
@@ -2857,6 +2919,11 @@ def main():
     Handler.initial_theme = args.theme
     Handler.allow_api_key_quota_reset = args.allow_api_key_quota_reset
     CC_LOADED[0] = not args.cc_not_loaded
+    if args.cc_fixed_key_on_shared_plan:
+        fixed = next(key for key in LIVE_KEYS if cc_fixed_scope(key["scope"]))
+        fixed["plan_id"] = "project-credit"
+        QUOTA_CYCLES.pop(fixed["scope"], None)
+        refresh_key_quota(fixed)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     entry_path = "/ui" if args.host == "standalone" else "/"
     print(
