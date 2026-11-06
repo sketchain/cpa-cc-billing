@@ -18,11 +18,12 @@ import (
 	"cpa-cc-billing/internal/billing"
 )
 
-const schemaVersion = 24
+const schemaVersion = 25
 
 type DB struct {
-	db   *sql.DB
-	path string
+	db      *sql.DB
+	path    string
+	notices []billing.RepositoryNotice
 }
 
 // StoredQuotaHeaders reads the quota report out of the headers a request stored
@@ -31,13 +32,51 @@ type StoredQuotaHeaders func(provider string, headers http.Header, at time.Time)
 
 // Open opens the billing database at path, migrating older formats;
 // storedHeaders reads the quota headers that formats before schema 20 stored.
-func Open(path string, storedHeaders StoredQuotaHeaders) (*DB, error) {
+// Before a migration rewrites existing data, Open backs the whole database up
+// beside it, and it migrates nothing when that backup fails.
+func Open(path string, storedHeaders StoredQuotaHeaders, opts ...Option) (*DB, error) {
+	options := openOptions{now: time.Now}
+	for _, option := range opts {
+		option(&options)
+	}
 	database, err := connect(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := database.transact(func(tx *sql.Tx) error {
-		if err := database.initSchema(tx, storedHeaders); err != nil {
+	if err := database.prepare(storedHeaders, options); err != nil {
+		_ = database.Close()
+		return nil, explainDamage(database.path, err)
+	}
+	return database, nil
+}
+
+func (d *DB) prepare(storedHeaders StoredQuotaHeaders, options openOptions) error {
+	current, err := d.readSchemaVersions()
+	if err != nil {
+		return err
+	}
+	backup := ""
+	if target, migrates := migrationTarget(current, options); migrates {
+		label := migrationBackupLabel(current, target, options.ccEnsure != nil)
+		var removed []string
+		backup, removed, err = d.backupBeforeMigration(current, target, options.ccEnsure != nil, options.now())
+		if backup == "" {
+			return fmt.Errorf("Back up billing database %s before migrating it (%s): %w; the database was not migrated. "+
+				"Make sure its directory is writable and has room for a full copy, then restart CLIProxyAPI", d.path, label, err)
+		}
+		d.notices = append(d.notices, billing.RepositoryNotice{Level: billing.PluginLogInfo,
+			Message: fmt.Sprintf("Backed up billing database %s before migrating it (%s): %s", d.path, label, backup)})
+		for _, name := range removed {
+			d.notices = append(d.notices, billing.RepositoryNotice{Level: billing.PluginLogInfo,
+				Message: fmt.Sprintf("Removed old migration backup %s; the newest %d are kept", name, migrationBackupsKept)})
+		}
+		if err != nil {
+			d.notices = append(d.notices, billing.RepositoryNotice{Level: billing.PluginLogError,
+				Message: fmt.Sprintf("Failed to remove old migration backups of %s: %v", d.path, err)})
+		}
+	}
+	if err := d.transact(func(tx *sql.Tx) error {
+		if err := d.initSchema(tx, storedHeaders); err != nil {
 			return err
 		}
 		for _, table := range slices.Sorted(maps.Keys(indexes)) {
@@ -47,10 +86,22 @@ func Open(path string, storedHeaders StoredQuotaHeaders) (*DB, error) {
 		}
 		return nil
 	}); err != nil {
-		_ = database.Close()
-		return nil, err
+		return withBackup(err, backup)
 	}
-	return database, nil
+	if options.ccEnsure != nil {
+		if err := options.ccEnsure(d.db); err != nil {
+			return withBackup(err, backup)
+		}
+	}
+	return nil
+}
+
+// withBackup names the backup taken before a migration that then failed.
+func withBackup(err error, backup string) error {
+	if backup == "" {
+		return err
+	}
+	return fmt.Errorf("%w; the database as it was before migrating is backed up at %s", err, backup)
 }
 
 // connect opens the database at path as it is.
@@ -80,7 +131,7 @@ func (d *DB) initSchema(tx *sql.Tx, storedHeaders StoredQuotaHeaders) error {
 		return fmt.Errorf("Read billing database %s: %w", d.path, err)
 	}
 	switch version {
-	case 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23:
+	case 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24:
 		if err := migrateSchema(tx, version, storedHeaders); err != nil {
 			return err
 		}

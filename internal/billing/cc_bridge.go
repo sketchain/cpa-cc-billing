@@ -38,9 +38,10 @@ type AnchorAlignment struct {
 // AlignWindowAnchor keeps the plan window of periodSeconds anchored on the
 // phase of resetAt, an upstream account's scheduled reset.
 //
-// A key's running cycle is never cut short: while any key on the plan has an
-// active cycle in that window, the anchor stays and the result is waiting.
-// Once those cycles have ended, the anchor moves; the next cycle the key's
+// A running cycle is never cut short: while any key on the plan, or the
+// plan's shared pool, has an active cycle in that window, the anchor stays
+// and the result is waiting. Once those cycles have ended, the anchor moves
+// and the ended cycles are cleared; the next cycle the key's
 // admission opens ends at resetAt and only counts usage from its opening. A
 // rolling window can be converted only when it is the plan's only window,
 // because all windows of a plan share one cycle mode.
@@ -90,6 +91,14 @@ func (s *Store) AlignWindowAnchor(planID string, periodSeconds int64, resetAt ti
 				}
 			}
 		}
+		// A shared pool's cycle outlives its members' key cycles: unbinding,
+		// rebinding or a new member's first request leaves it running alone.
+		if cycle, ok := plan.Cycles[window.ID]; ok && now.Before(cycle.EndAt) {
+			waiting.Status = AnchorWaiting
+			if cycle.EndAt.After(waiting.WaitUntil) {
+				waiting.WaitUntil = cycle.EndAt
+			}
+		}
 		if waiting.Status != "" {
 			return planIndex, windowIndex, waiting
 		}
@@ -105,8 +114,12 @@ func (s *Store) AlignWindowAnchor(planID string, periodSeconds int64, resetAt ti
 		if result.Status != AnchorChanged {
 			return result, Changes{}, nil
 		}
-		window := &state.Plans[planIndex].Windows[windowIndex]
+		plan := &state.Plans[planIndex]
+		window := &plan.Windows[windowIndex]
 		window.CycleAnchorAt = resetAt
+		// An ended pool cycle that admission has not settled yet would no
+		// longer lie on the new anchor's grid, and saving it would fail.
+		delete(plan.Cycles, window.ID)
 		var keys []string
 		for scope, key := range state.Keys {
 			if key == nil || key.PlanID != planID {
@@ -117,13 +130,26 @@ func (s *Store) AlignWindowAnchor(planID string, periodSeconds int64, resetAt ti
 			}
 			keys = append(keys, scope)
 		}
-		return result, Changes{Plans: true, Keys: keys}, nil
+		return result, Changes{Plans: true, PlanCycles: []string{planID}, Keys: keys}, nil
 	})
 	if err == nil && result.Status == AnchorChanged {
 		s.AddPluginLog(PluginLogInfo, "Aligned the %d-second window of subscription plan %q with the upstream account reset at %s",
 			periodSeconds, planID, resetAt.Format(time.RFC3339))
 	}
 	return result, err
+}
+
+// PlanByID returns a copy of a subscription plan. It only reads, so hot paths
+// may call it; unlike PlanViews it never settles or saves shared pool cycles.
+func (s *Store) PlanByID(id string) (Plan, bool) {
+	var plan Plan
+	found := false
+	s.read(func(state *State) {
+		if current := state.FindPlan(id); current != nil {
+			plan, found = clonePlan(*current), true
+		}
+	})
+	return plan, found
 }
 
 // SetClock replaces the store's clock; tests outside this package use it.
@@ -169,11 +195,9 @@ func (s *Store) KeyViewForScopeAt(scope string) (KeyView, bool, uint64) {
 			return result{seq: s.usageSeq}, Changes{}
 		}
 		now := s.Now()
-		changed := Changes{}
-		if settleExpiredCycles(key, now) {
-			changed.Keys = []string{scope}
-		}
-		return result{view: s.keyView(state, scope, key, now), ok: true, seq: s.usageSeq}, changed
+		plan := state.FindPlan(key.PlanID)
+		changed := settleQuota(scope, key, plan, now)
+		return result{view: s.keyView(state, scope, key, plan, now), ok: true, seq: s.usageSeq}, changed
 	})
 	return current.view, current.ok, current.seq
 }

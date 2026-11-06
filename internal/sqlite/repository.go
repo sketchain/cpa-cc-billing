@@ -8,6 +8,11 @@ import (
 )
 
 func (d *DB) Load(requestEventCutoff, pluginLogCutoff time.Time) (billing.Snapshot, error) {
+	snapshot, err := d.load(requestEventCutoff, pluginLogCutoff)
+	return snapshot, explainDamage(d.path, err)
+}
+
+func (d *DB) load(requestEventCutoff, pluginLogCutoff time.Time) (billing.Snapshot, error) {
 	if err := pruneRequestEvents(d.db.Exec, requestEventCutoff); err != nil {
 		return billing.Snapshot{}, err
 	}
@@ -71,6 +76,14 @@ func saveStateTables(tx *sql.Tx, state *billing.State, changes billing.Changes) 
 	if changes.Plans {
 		if err := replacePlans(tx, state); err != nil {
 			return err
+		}
+	} else {
+		for _, id := range changes.PlanCycles {
+			if plan := state.FindPlan(id); plan != nil {
+				if err := savePlanCycles(tx, plan); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	if changes.Routes {

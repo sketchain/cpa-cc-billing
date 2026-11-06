@@ -194,6 +194,10 @@ function renderCC() {
       )
     );
   if (data.cc.error) notices.push(el("div", { class: "notice err show", text: m("cc.estimation_error", { v0: data.cc.error }) }));
+  for (const warning of data.cc.warnings || []) {
+    const text = window.billingI18n.serverMessage(warning, "");
+    if (text) notices.push(el("div", { class: "notice err show cc-shared-plan-warning", role: "alert", text }));
+  }
   const stale = ccStaleEntries(data, draft);
   if (stale.keys.length || stale.accounts.length)
     notices.push(

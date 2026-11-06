@@ -18,7 +18,7 @@ const (
 const (
 	PluginID   = "cpa-cc-billing"
 	PluginName = "CPA CC Billing"
-	Version    = "0.2.0"
+	Version    = "0.2.1"
 
 	MenuLabel       = "CPA CC Billing"
 	MenuDescription = "Split Claude subscription quotas between downstream API keys, and manage their routing, billing, concurrency limits and usage"

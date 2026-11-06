@@ -43,36 +43,6 @@ func (a *App) routeRows() []routeRow {
 	return rows
 }
 
-func (a *App) createPlan(req ManagementRequest) ManagementResponse {
-	var body struct {
-		billing.Plan
-		Scopes []string `json:"scopes,omitempty"`
-	}
-	if errDecode := decodeStrict(req.Body, &body); errDecode != nil {
-		return errorResponse(errDecode)
-	}
-	stored, errCreate := a.store.CreatePlanWithBindings(body.Plan, body.Scopes)
-	if errCreate != nil {
-		return errorResponse(errCreate)
-	}
-	return JSONResponse(http.StatusCreated, map[string]any{"plan": stored})
-}
-
-func (a *App) updatePlan(req ManagementRequest) ManagementResponse {
-	var body struct {
-		billing.PlanPatch
-		Scopes *[]string `json:"scopes,omitempty"`
-	}
-	if errDecode := decodeStrict(req.Body, &body); errDecode != nil {
-		return errorResponse(errDecode)
-	}
-	stored, errUpdate := a.store.UpdatePlanWithBindings(body.PlanPatch, body.Scopes)
-	if errUpdate != nil {
-		return errorResponse(errUpdate)
-	}
-	return JSONResponse(http.StatusOK, map[string]any{"plan": stored})
-}
-
 func (a *App) createRoute(req ManagementRequest) ManagementResponse {
 	var body struct {
 		Name   string            `json:"name"`
@@ -235,15 +205,6 @@ func (a *App) clearPluginLogs() ManagementResponse {
 	return JSONResponse(http.StatusOK, map[string]any{"cleared": cleared})
 }
 
-func (a *App) deletePlan(req ManagementRequest) ManagementResponse {
-	id := strings.TrimSpace(req.Query.Get("id"))
-	unbound, errDelete := a.store.DeletePlan(id)
-	if errDelete != nil {
-		return errorResponse(errDelete)
-	}
-	return JSONResponse(http.StatusOK, map[string]any{"deleted": id, "unbound_keys": unbound})
-}
-
 func (a *App) bindKey(req ManagementRequest) ManagementResponse {
 	var body struct {
 		Scope  string `json:"scope"`
@@ -251,6 +212,11 @@ func (a *App) bindKey(req ManagementRequest) ManagementResponse {
 	}
 	if errDecode := decodeStrict(req.Body, &body); errDecode != nil {
 		return errorResponse(errDecode)
+	}
+	if plan, found := a.store.PlanByID(body.PlanID); found {
+		if refusal, refused := a.ccRefuseSharedPlan(plan.ID, plan.SharedQuota, []string{body.Scope}); refused {
+			return refusal
+		}
 	}
 	if errBind := a.store.BindKey(body.Scope, body.PlanID); errBind != nil {
 		return errorResponse(errBind)
