@@ -289,8 +289,9 @@ PLANS = [
         {"id": "budget", "name": "生产预算", "amount": 1000,
          "period_seconds": 2592000, "cycle_anchor_at": iso((NOW + timedelta(days=15)).replace(hour=0))},
     ]},
-    {"id": "project-credit", "name": "项目额度", "currency": "CNY", "windows": [
-        {"id": "budget", "name": "项目预算", "amount": 700, "period_seconds": 864000},
+    {"id": "project-credit", "name": "项目共享额度", "currency": "CNY", "shared_quota": True, "windows": [
+        {"id": "budget", "name": "项目预算", "amount": 700, "period_seconds": 864000,
+         "cycle_anchor_at": iso(NOW + timedelta(days=5))},
     ]},
 ]
 
@@ -298,19 +299,16 @@ PLANS = [
 QUOTA_CYCLES = {}
 
 
-def refresh_key_quota(key):
-    plan = next((item for item in PLANS if item["id"] == key["plan_id"]), None)
-    previous = QUOTA_CYCLES.get(key["scope"], {})
+def quota_view(plan, previous, keep_expired=False):
     cycles = {}
     now = datetime.now(timezone.utc)
-    key.update(plan_name=plan["name"] if plan else "", unlimited=plan is None, blocked=False, windows=[])
-    key.pop("retry_at", None)
+    view = dict(shared_quota=bool(plan and plan.get("shared_quota")), unlimited=plan is None, blocked=False, windows=[])
     for window in plan["windows"] if plan else []:
         cycle = previous.get(window["id"], {})
-        started = (cycle.get("plan_id") == key["plan_id"]
+        started = (cycle.get("plan_id") == plan["id"]
                    and cycle.get("period_seconds") == window["period_seconds"]
                    and cycle.get("cycle_anchor_at") == window.get("cycle_anchor_at")
-                   and (key.get("deleted_at") or datetime.fromisoformat(cycle["end_at"].replace("Z", "+00:00")) > now))
+                   and (keep_expired or datetime.fromisoformat(cycle["end_at"].replace("Z", "+00:00")) > now))
         if started:
             cycles[window["id"]] = cycle
         else:
@@ -328,18 +326,41 @@ def refresh_key_quota(key):
                           ("amount", window.get("amount", 0), cycle.get("spent", 0)),
                           ("tokens", window.get("token_limit", 0), cycle.get("used_tokens", 0)),
                           ("requests", window.get("request_limit", 0), cycle.get("used_requests", 0))] if limit > 0]
-        view = dict(id=window["id"], name=window["name"], period_seconds=window["period_seconds"],
+        row = dict(id=window["id"], name=window["name"], period_seconds=window["period_seconds"],
                     started=started, blocked=any(dimension["blocked"] for dimension in dimensions),
                     dimensions=dimensions)
         if window.get("cycle_anchor_at"):
-            view["cycle_anchor_at"] = window["cycle_anchor_at"]
+            row["cycle_anchor_at"] = window["cycle_anchor_at"]
         if started:
-            view.update(start_at=cycle["start_at"], end_at=cycle["end_at"])
-        if view["blocked"]:
-            key["blocked"] = True
-            key["retry_at"] = max(key.get("retry_at", ""), view["end_at"])
-        key["windows"].append(view)
-    QUOTA_CYCLES[key["scope"]] = cycles
+            row.update(start_at=cycle["start_at"], end_at=cycle["end_at"])
+        if row["blocked"]:
+            view["blocked"] = True
+            view["retry_at"] = max(view.get("retry_at", ""), row["end_at"])
+        view["windows"].append(row)
+    return view, cycles
+
+
+SHARED_QUOTA_CYCLES = {}
+
+
+def refresh_key_quota(key):
+    plan = next((item for item in PLANS if item["id"] == key["plan_id"]), None)
+    shared = bool(plan and plan.get("shared_quota"))
+    owner = plan["id"] if shared else key["scope"]
+    store = SHARED_QUOTA_CYCLES if shared else QUOTA_CYCLES
+    view, store[owner] = quota_view(plan, store.get(owner, {}), bool(key.get("deleted_at") and not shared))
+    key.pop("retry_at", None)
+    key.update(plan_name=plan["name"] if plan else "", **view)
+
+
+def plan_views():
+    result = []
+    for plan in PLANS:
+        row = dict(plan)
+        if plan.get("shared_quota"):
+            row["quota"], SHARED_QUOTA_CYCLES[plan["id"]] = quota_view(plan, SHARED_QUOTA_CYCLES.get(plan["id"], {}))
+        result.append(row)
+    return result
 
 
 AUTOMATION_CREDENTIAL_REF = "sha256:" + "f" * 64
@@ -647,11 +668,14 @@ def quota_usage(tokens, cost_usd, models=CODEX_MODELS):
 QUOTA_WINDOW_LENGTHS = {"5 小时限额": timedelta(hours=5), "周限额": timedelta(days=7), "月度额度": timedelta(days=30)}
 
 
-def quota_row(label, remaining_percent, reset_seconds, **extra):
+def quota_row(label, remaining_percent, reset_seconds, *, include=(), exclude=(), **extra):
     reset_at = NOW + timedelta(seconds=reset_seconds)
     row = {"label": label, "remaining_percent": remaining_percent, "reset_at": iso(reset_at), **extra}
     if "usage" in row:
         row["usage_query"] = {"from": iso(reset_at - QUOTA_WINDOW_LENGTHS[label]), "to": iso(NOW)}
+        for key, values in (("include", include), ("exclude", exclude)):
+            if values:
+                row["usage_query"][key] = list(values)
     return row
 
 
@@ -720,10 +744,16 @@ AUTH_FILE_QUOTAS = {
     "auth-demo-antigravity": {
         "plan": "Google AI Pro",
         "quota": [
-            quota_row("5 小时限额", 99, 10800, group_label="Claude and GPT Models"),
-            quota_row("周限额", 99, 518400, group_label="Claude and GPT Models"),
-            quota_row("5 小时限额", 82, 14400, group_label="Gemini Models"),
-            quota_row("周限额", 93, 432000, group_label="Gemini Models"),
+            quota_row("5 小时限额", 100, 14400, group_label="Gemini Models",
+                      include=("gemini-",), exclude=("gemini-4-argon",), **quota_usage(0, 0, ("gemini-3-flash",))),
+            quota_row("周限额", 93, 432000, group_label="Gemini Models",
+                      include=("gemini-",), exclude=("gemini-4-argon",), **quota_usage(3_910_024, 2.17, ("gemini-3-flash", "gemini-3.1-pro"))),
+            quota_row("5 小时限额", 99, 14400, group_label="Claude and GPT Models",
+                      include=("claude-", "gpt-"), **quota_usage(245_118, 0.63, ("claude-sonnet-4-6", "gpt-oss-120b"))),
+            quota_row("周限额", 99, 518400, group_label="Claude and GPT Models",
+                      include=("claude-", "gpt-"), **quota_usage(1_822_391, 4.72, ("claude-sonnet-4-6", "gpt-oss-120b"))),
+            quota_row("周限额", 58, 432000, group_label="Gemini 4 Argon",
+                      include=("gemini-4-argon",), **quota_usage(6_380_000, 9.64, ("gemini-4-argon",))),
         ],
     },
     "auth-demo-kimi": {
@@ -880,7 +910,9 @@ def usage_models(query, scope=""):
         periods = [*AUTH_FILE_QUOTAS.get(auth_index, {}).get("quota", []),
                    *(period for window in AUTH_FILE_HISTORY.get(auth_index, []) for period in window["periods"])]
         for period in periods:
-            if "usage_query" in period and (period["usage_query"]["from"], period["usage_query"]["to"]) == bounds:
+            window = period.get("usage_query")
+            if (window and (window["from"], window["to"]) == bounds
+                    and all(window.get(key, []) == query.get(key, []) for key in ("include", "exclude"))):
                 return {"models": model_split(period["usage"]["tokens"], period["usage"]["cost_usd"], period["_models"])}
         return {"models": model_usage([entry for entry in filter_event_time(REQUEST_EVENTS, query)
                                        if entry["auth_index"] == auth_index and (not scope or entry["scope"] == scope)])}
@@ -948,6 +980,15 @@ def make_key(index):
 
 
 KEYS = [make_key(index) for index in range(1, len(KEY_PROFILES) + 1)]
+for key in KEYS:
+    if key.get("shared_quota"):
+        pool = SHARED_QUOTA_CYCLES.setdefault(key["plan_id"], {})
+        for window_id, cycle in QUOTA_CYCLES.get(key["scope"], {}).items():
+            total = pool.setdefault(window_id, {**cycle, "spent": 0, "used_tokens": 0, "used_requests": 0})
+            for metric in ("spent", "used_tokens", "used_requests"):
+                total[metric] += cycle[metric]
+for key in KEYS:
+    refresh_key_quota(key)
 KEYS[-2]["in_config"] = False
 KEYS[-2]["deleted_at"] = iso(NOW - timedelta(days=2))
 KEYS[-1]["in_config"] = False
@@ -2144,7 +2185,7 @@ def payload_for(path, query):
         refresh_route_counts()
         return {"keys": key_rows()}
     if path == f"{API_BASE}/plans":
-        return {"plans": PLANS}
+        return {"plans": plan_views()}
     if path == f"{API_BASE}/routes":
         refresh_route_counts()
         return {"routes": route_rows()}
@@ -2247,11 +2288,11 @@ class Handler(BaseHTTPRequestHandler):
         if 200 <= status < 300 and getattr(self, "mutation_view", None) is not None:
             path = urlparse(self.path).path
             view = {}
-            if path in {f"{API_BASE}/plans", f"{API_BASE}/routes"} or path.startswith(f"{API_BASE}/keys/"):
+            if path in {f"{API_BASE}/plans", f"{API_BASE}/plans/reset", f"{API_BASE}/routes"} or path.startswith(f"{API_BASE}/keys/"):
                 refresh_route_counts()
                 view["keys"] = key_rows()
-                if path == f"{API_BASE}/plans":
-                    view["plans"] = PLANS
+                if path in {f"{API_BASE}/plans", f"{API_BASE}/plans/reset", f"{API_BASE}/keys/reset"}:
+                    view["plans"] = plan_views()
                 if path in {f"{API_BASE}/routes", f"{API_BASE}/keys/routes"}:
                     view["routes"] = route_rows()
             elif path in {f"{API_BASE}/prices", f"{API_BASE}/prices/reference/refresh"}:
@@ -2344,7 +2385,7 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path.endswith("/subscription"):
                 key = LIVE_KEYS[index]
                 refresh_key_quota(key)
-                self.send_json(200, {"subscription": {"name": key["plan_name"], "unlimited": key["unlimited"], "blocked": key["blocked"], "windows": key["windows"], "retry_at": key.get("retry_at")}, "concurrency": {"limit": key["concurrency_limit"], "current": key["current_concurrency"]}})
+                self.send_json(200, {"subscription": {"shared_quota": key["shared_quota"], "name": key["plan_name"], "unlimited": key["unlimited"], "blocked": key["blocked"], "windows": key["windows"], "retry_at": key.get("retry_at")}, "concurrency": {"limit": key["concurrency_limit"], "current": key["current_concurrency"]}})
             elif parsed.path.endswith("/routing"):
                 self.send_json(200, account_routing_view(index))
             elif parsed.path.endswith("/currency"):
@@ -2586,11 +2627,17 @@ class Handler(BaseHTTPRequestHandler):
                     "long_context": None,
                 })
             self.send_json(200, {"deleted": model})
-        elif route == ("POST", f"{API_BASE}/keys/reset"):
+        elif route in {("POST", f"{API_BASE}/keys/reset"), ("POST", f"{API_BASE}/plans/reset")}:
             body = json.loads(request_body or b"{}")
             targets = [key for key in KEYS if not key.get("deleted_at") and key["plan_id"]
                        and (body.get("mode") == "global" or key["scope"] in body.get("scopes", []))]
-            counts = {"keys": 0, "windows": 0}
+            pools = {plan["id"] for plan in PLANS if plan.get("shared_quota") and (
+                body.get("mode") == "global" or plan["id"] == body.get("id") or
+                any(key["plan_id"] == plan["id"] for key in targets))}
+            targets = [key for key in KEYS if key in targets or key["plan_id"] in pools]
+            counts = {"keys": 0, "windows": 0, "pools": len(pools)}
+            for pool in pools:
+                counts["windows"] += len(SHARED_QUOTA_CYCLES.pop(pool, {}))
             for key in targets:
                 count = len(QUOTA_CYCLES.get(key["scope"], {}))
                 counts["keys"] += bool(count)
@@ -2702,10 +2749,21 @@ class Handler(BaseHTTPRequestHandler):
             if stored is None:
                 self.send_json(404, {"error": {"message": "dummy backend: plan not found"}})
                 return
-            stored.update({key: body[key] for key in ("name", "currency", "windows") if key in body})
+            old = json.loads(json.dumps(stored))
+            stored.update({key: body[key] for key in ("name", "currency", "windows", "shared_quota") if key in body})
             for index, window in enumerate(stored["windows"]):
                 window.setdefault("id", str(time.time_ns()) + "-" + str(index))
             stored["windows"].sort(key=lambda window: window["period_seconds"])
+            reset = {window["id"] for window in old.get("windows", []) if
+                     bool(old.get("shared_quota")) != bool(stored.get("shared_quota")) or
+                     not any(item["id"] == window["id"] and
+                             item["period_seconds"] == window["period_seconds"] and
+                             item.get("cycle_anchor_at") == window.get("cycle_anchor_at")
+                             for item in stored["windows"])}
+            for cycles in [SHARED_QUOTA_CYCLES.get(plan_id, {})] + [
+                    QUOTA_CYCLES.get(key["scope"], {}) for key in KEYS if key["plan_id"] == plan_id]:
+                for window_id in reset:
+                    cycles.pop(window_id, None)
             if "scopes" in body:
                 scopes = set(body["scopes"])
                 for key in KEYS:
@@ -2738,6 +2796,7 @@ class Handler(BaseHTTPRequestHandler):
         elif route == ("DELETE", f"{API_BASE}/plans"):
             plan_id = parse_qs(parsed.query).get("id", [""])[0]
             PLANS[:] = [plan for plan in PLANS if plan["id"] != plan_id]
+            SHARED_QUOTA_CYCLES.pop(plan_id, None)
             for key in KEYS:
                 if key["plan_id"] == plan_id:
                     key["plan_id"] = ""
