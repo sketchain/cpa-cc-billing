@@ -145,6 +145,11 @@ func (s *Store) Configure(cfg Config) error {
 		s.closeRepository(previous)
 	}
 
+	if reporter, ok := repo.(interface{ OpenNotices() []RepositoryNotice }); ok {
+		for _, notice := range reporter.OpenNotices() {
+			s.AddPluginLog(notice.Level, "%s", notice.Message)
+		}
+	}
 	s.AddPluginLog(PluginLogInfo, "Loaded billing database: %s, %d API keys, %d subscription plans, %d request events, %s",
 		path, len(snapshot.State.Keys), len(snapshot.State.Plans), snapshot.RequestEventCount, normalized.describe())
 	return nil

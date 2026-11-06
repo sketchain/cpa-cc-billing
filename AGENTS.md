@@ -14,7 +14,7 @@ Source paths are relative to this repository's root:
 - **Go changes:** Run `go vet ./...` and `go test -race ./...`.
 - **Frontend changes:** Start `python3 scripts/frontend_dummy_backend.py` on a port other than the default 8765, such as `--port 18765`, and verify affected desktop and narrow-screen layouts with Playwright, beyond static checks. Add `--host cpamc` or `--host cpamp` to check host-specific styles inside those shells.
 - **Frontend regression scripts:** Store JavaScript scripts used with `playwright-cli` for browser regression testing in a temporary directory, never in the project's `scripts/` directory.
-- **Billing changes:** Run `scripts/e2e_cpa_billing.sh v7.3.7` after modifying any billing behavior, including usage parsing, pricing, quota enforcement, or failure reporting. Keep this baseline aligned with the minimum supported CLIProxyAPI version in `README.md` and `README.en.md`.
+- **Billing changes:** Run `scripts/e2e_cpa_billing.sh v7.3.7 v8.0.58` after modifying any billing behavior, including usage parsing, pricing, quota enforcement, or failure reporting. Keep the first target aligned with the minimum supported CLIProxyAPI version in `README.md` and `README.en.md`, and the second on a current v8 release.
 
 ## Frontend Layout
 

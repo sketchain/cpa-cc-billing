@@ -32,6 +32,13 @@ type Repository interface {
 	Close() error
 }
 
+// RepositoryNotice is something a repository reports about opening its
+// database, such as the backup it took before migrating it.
+type RepositoryNotice struct {
+	Level   PluginLogLevel
+	Message string
+}
+
 type Snapshot struct {
 	State             *State
 	RequestEventCount int

@@ -4,10 +4,12 @@ set -euo pipefail
 
 # Usage: e2e_cpa_billing.sh [目标 ...]
 #
-# Each argument names one CLIProxyAPI to test, and they are tested in turn:
+# Each argument names one CLIProxyAPI to test, and they are tested in turn. On
+# v8 hosts the suite also has CLIProxyAPI rewrite its configuration in the v8
+# layout midway and checks that the plugin keeps its settings and database.
 #
 #	不传参数            GitHub 上的最新发布版
-#	7.3.7               GitHub 上的该发布版
+#	7.3.7 8.0.58        GitHub 上的这些发布版，v7 和 v8 均可
 #	../CLIProxyAPI      代码目录，现场构建
 #	../cli-proxy-api    可执行文件，直接使用
 readonly github_repo="router-for-me/CLIProxyAPI"
@@ -1543,6 +1545,72 @@ assert_cc_split() {
     --data "$(jq -nc --arg a "$remainder_key" '[$a]')" >/dev/null
 }
 
+# The management page is one self-contained HTML resource the plugin serves.
+assert_management_page() {
+  local port="$1" runtime_dir="$2"
+  local page_file="$runtime_dir/ui.html" headers_file="$runtime_dir/ui-headers.txt"
+  local version
+  version="$(awk -F'"' '/^[[:space:]]*Version[[:space:]]*=/ {print $2; exit}' "$repo_dir/internal/plugin/types.go")"
+  management_call GET "$port" "/v0/resource/plugins/cpa-cc-billing/ui" -D "$headers_file" >"$page_file"
+  if ! grep -Eiq '^content-type:[[:space:]]*text/html' "$headers_file" ||
+    ! grep -q '<title>CPA CC Billing</title>' "$page_file" ||
+    ! grep -q "v${version}" "$page_file" ||
+    grep -Eq '/\*[a-z_-]+\.(css|js)\*/' "$page_file"; then
+    echo "插件管理页未正确返回：$(head -c 200 "$page_file")" >&2
+    return 1
+  fi
+}
+
+# CLIProxyAPI v8 keeps a legacy configuration file as it is until its first v8
+# configuration write, which rewrites the whole file in the v8 layout. The
+# plugin's settings must come through that rewrite and the plugin must keep
+# running on the same database; the later checks then run on the migrated file.
+assert_v8_config_migration() {
+  local port="$1" runtime_dir="$2"
+  local config_file="$runtime_dir/config.yaml" plugin_config_file="$runtime_dir/v8-plugin-config.json"
+  local plugins_file="$runtime_dir/v8-plugins.json" logs_file="$runtime_dir/v8-plugin-logs.json" status last_log
+  status="$(curl -sS -o /dev/null --max-time 30 --write-out '%{http_code}' \
+    -H "Authorization: Bearer e2e-management-key" "http://127.0.0.1:$port/v8/management/config")"
+  if [[ "$status" == "404" ]]; then
+    log_step "宿主没有 v8 配置接口，跳过 v8 配置迁移"
+    return
+  fi
+  if [[ "$status" != "200" ]]; then
+    echo "读取 v8 配置失败，HTTP ${status}。" >&2
+    return 1
+  fi
+  if grep -Eq '^config-version:' "$config_file"; then
+    echo "配置文件在 v8 写入前已被改写。" >&2
+    return 1
+  fi
+  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/plugin-logs" >"$logs_file"
+  last_log="$(jq '[.entries[].id] | max // 0' "$logs_file")"
+  management_call PATCH "$port" "/v8/management/config" -H "Content-Type: application/json" \
+    --data '{"routing":{"retry":{"request-retry":0}}}' >/dev/null
+  if ! grep -Eq '^config-version:[[:space:]]*8[[:space:]]*$' "$config_file" ||
+    ! grep -Eq '^plugins:' "$config_file" || ! grep -Fq "$runtime_dir/state.db" "$config_file"; then
+    echo "v8 配置写入后，配置文件未迁移为 v8 格式或缺少插件配置。" >&2
+    return 1
+  fi
+  management_call GET "$port" "/v8/management/config/plugins/configs/cpa-cc-billing" >"$plugin_config_file"
+  if ! jq -e --arg state "$runtime_dir/state.db" '.state_file == $state and .enabled == true and .debug == true' \
+    "$plugin_config_file" >/dev/null; then
+    echo "v8 配置中的插件配置不正确：$(jq -c . "$plugin_config_file")" >&2
+    return 1
+  fi
+  # The host reloads the rewritten file asynchronously.
+  sleep 2
+  management_call GET "$port" "/v0/management/plugins" >"$plugins_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/plugin-logs" >"$logs_file"
+  if ! jq -e '.plugins[] | select(.id == "cpa-cc-billing" and .registered == true and .effective_enabled == true)' "$plugins_file" >/dev/null ||
+    ! jq -e '[.entries[] | select(.message | contains("Loaded billing database"))] | length == 1' "$logs_file" >/dev/null ||
+    jq -e --argjson last "$last_log" '[.entries[] | select(.id > $last and .level == "error")] | length > 0' "$logs_file" >/dev/null; then
+    echo "v8 配置迁移后插件状态异常：$(jq -c --argjson last "$last_log" '[.entries[] | select(.id > $last)]' "$logs_file")" >&2
+    return 1
+  fi
+  log_step "v8 配置迁移：配置文件改写为 v8 格式，插件配置保留，插件仍使用原数据库"
+}
+
 run_target() {
   local target="$1"
   local index="$2"
@@ -1602,6 +1670,8 @@ run_target() {
     return 1
   fi
   log_step "插件已注册并启用"
+  assert_management_page "$port" "$runtime_dir"
+  log_step "插件管理页已返回"
   management_call GET "$port" "/v0/management/quota/providers" >"$runtime_dir/quota-providers.json"
   if ! jq -e '.providers[] | select(.plugin_id == "cpa-cc-billing" and .supports_reset == true and (.supported_providers | index("codex")))' "$runtime_dir/quota-providers.json" >/dev/null; then
     echo "插件标准额度能力未注册。" >&2
@@ -1919,6 +1989,7 @@ run_target() {
     return 1
   fi
   log_step "插件启动事件已验证"
+  assert_v8_config_migration "$port" "$runtime_dir"
   assert_reference_price_billing "$port" "$runtime_dir"
   assert_unpriced_model_policy "$port" "$runtime_dir"
   log_step "CC 分账：周期对齐、/balance、5h 预留与周预留拦截"

@@ -180,7 +180,7 @@ Use **Import JSON** on the model pricing card, or `POST /v0/management/plugins/c
 
 ## Requirements
 
-- CLIProxyAPI **7.3.7 or later**. [Model list filtering](#model-lists) requires **8.0.37 or later**.
+- CLIProxyAPI **7.3.7 or later**, including v8. [Model list filtering](#model-lists) requires **8.0.37 or later**.
 - A CLIProxyAPI build with plugin support. Builds labeled `no-plugin` cannot load this plugin.
 
 ## Installation
@@ -242,12 +242,48 @@ CPA selects one scheduling plugin by priority rather than calling them in sequen
 For initial selections or invalid session bindings, the plugin uses the highest available priority tier, then applies the selected strategy. With session affinity enabled, the same session reuses its bound credential while it remains available. Bindings expire after the idle period specified by `session-affinity-ttl`. Affinity requires a session identity supplied by CPA; requests without one follow the selected strategy.
 
 > [!WARNING]
-> Back up your data file before upgrading.
+> Stop the service and back up your data file before upgrading; see [Upgrading and database recovery](#upgrading-and-database-recovery).
 >
 > - Databases of cpa-key-billing v1.0.0 or later can be used directly; see [Migrating from cpa-key-billing](#migrating-from-cpa-key-billing).
 > - JSON and SQLite files from cpa-key-billing v0.8.4 or earlier cannot be migrated. Point `state_file` to a new file instead.
 
 Restart CLIProxyAPI and open **CPA CC Billing** in the management panel. Review model pricing, create subscription plans, and bind the API keys whose quotas you want to enforce.
+
+## Upgrading and database recovery
+
+### Before upgrading
+
+1. Stop CLIProxyAPI (with Docker Compose, stop the `cli-proxy-api` service).
+2. Back up the database `state_file` points to (by default `plugins/cpa-cc-billing-state-v1.db`) together with its `-wal` and `-shm` files if present. Copy all three after stopping the service: the `.db` file alone can miss the most recent writes.
+3. Replace the plugin and start CLIProxyAPI.
+
+To return to an older plugin version, first restore the backup taken before upgrading: older versions cannot open a database a newer version has migrated.
+
+### Automatic backup before migrations
+
+When the plugin opens a database whose structure needs upgrading (the billing tables' `PRAGMA user_version` or the CC tables' `cc_meta` `schema_version`), it first copies the whole database, including what its write-ahead log holds, into the same directory with SQLite's `VACUUM INTO`, checks that the copy opens intact, and only then migrates:
+
+```text
+plugins/cpa-cc-billing-state-v1.db.bak-u24-to-u25-cc4-20261107T120000
+```
+
+The name carries the old and new billing versions, the old and new CC versions (one number when unchanged) and the backup time in UTC. Backups have mode `600`; only the newest three are kept and older ones are removed. No backup is taken when nothing needs migrating. The plugin log records the path of each backup.
+
+If the backup fails, for example because the directory is not writable or the disk is full, nothing is migrated: registration fails and the CLIProxyAPI log states the reason and the database path. Fix it and restart. If the migration itself fails, the log names the backup taken for it.
+
+### Damaged database
+
+If registration fails with `malformed database schema`, `database disk image is malformed` or `file is not a database`, the database file is damaged. The log also lists the migration backups found beside it.
+
+1. Stop CLIProxyAPI and set the damaged `.db`, `-wal` and `-shm` files aside.
+2. If a suitable backup exists, restore it: copy the migration backup (or your own) to `state_file` and delete the old `-wal` and `-shm` files. The plugin migrates it again on start; anything recorded after the backup is lost.
+3. Otherwise salvage the damaged file with sqlite3 and put the recovered file in its place (again deleting the old `-wal` and `-shm`):
+
+   ```sh
+   sqlite3 plugins/cpa-cc-billing-state-v1.db ".recover" | sqlite3 plugins/cpa-cc-billing-state-v1.db.recovered
+   ```
+
+4. After starting, open the **CC split** page and use **Rebuild from history** to restore `cc_segments` and the other data derived from request history.
 
 ## Access
 
