@@ -211,10 +211,6 @@
     "key": "backend.the_subscription_plan_bound_to_this_api_key_does_not_exist",
     "formats": []
   },
-  "Invalid quota cycle data for this API key": {
-    "key": "backend.invalid_quota_cycle_data_for_this_api_key",
-    "formats": []
-  },
   "Reference price provider ID and model ID are required": {
     "key": "backend.reference_price_provider_id_and_model_id_are_required",
     "formats": []
@@ -661,6 +657,27 @@
       "%q"
     ]
   },
+  "CC fixed key %s is bound to shared quota plan %q; give it a plan without shared quota": {
+    "key": "backend.cc_fixed_key_on_shared_plan",
+    "formats": [
+      "%s",
+      "%q"
+    ]
+  },
+  "Subscription plan %q cannot share quota while CC fixed key %s is bound to it; give the fixed key a plan without shared quota": {
+    "key": "backend.cc_shared_plan_has_fixed_key",
+    "formats": [
+      "%q",
+      "%s"
+    ]
+  },
+  "CC fixed key %s is bound to shared quota plan %q; its weekly reservation counts the whole shared pool and overstates the pool's reservations. Bind it to a plan without shared quota.": {
+    "key": "backend.cc_fixed_key_shared_plan_warning",
+    "formats": [
+      "%s",
+      "%q"
+    ]
+  },
   "auth_index is required": {
     "key": "backend.auth_index_is_required",
     "formats": []
@@ -712,6 +729,18 @@
   },
   "Only fixed keys of the simulated pool can be changed": {
     "key": "backend.only_fixed_keys_of_the_simulated_pool_can_be_changed",
+    "formats": []
+  },
+  "Shared quotas require a shared reset schedule": {
+    "key": "backend.shared_quotas_require_a_shared_reset_schedule",
+    "formats": []
+  },
+  "This subscription plan does not share quota": {
+    "key": "backend.this_subscription_plan_does_not_share_quota",
+    "formats": []
+  },
+  "Invalid quota cycle data": {
+    "key": "backend.invalid_quota_cycle_data",
     "formats": []
   }
 }

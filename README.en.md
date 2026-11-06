@@ -23,6 +23,7 @@ A fork of [cpa-key-billing](https://github.com/haowang02/cpa-plugin-key-billing)
 
 - Set spending, token, and request quotas for each API key, with independent or shared reset schedules.
 - Price models and subscription plans in USD or CNY, and view usage statistics in either currency.
+- Shared quota plans let all bound keys consume one quota pool that resets on the plan's schedule.
 - Apply separate rates to requests that exceed a long-context input threshold.
 - Limit concurrent requests per API key.
 - Control access to models and upstream credentials with routing rules.
@@ -60,7 +61,7 @@ flowchart TB
 
 - **Account**: one Claude OAuth credential in CPA (by `auth_index`), estimated on its own.
 - **Pool**: a set of accounts that fixed and remainder keys share; its remaining capacity is the sum of its accounts'. An anchor account, chosen with **Set as anchor** on the page, anchors the pool's weekly cycles and 5-hour window (pools saved before take their first account). An account can belong to only one pool; saving checks it.
-- **Fixed key**: bound, on the API Key page, to a subscription plan with a **7-day amount window**; that amount is its weekly quota. **Give each fixed key a plan of its own**: aligning cycles changes the plan itself, which affects every key bound to it.
+- **Fixed key**: bound, on the API Key page, to a subscription plan with a **7-day amount window**; that amount is its weekly quota. **Give each fixed key a plan of its own**: aligning cycles changes the plan itself, which affects every key bound to it. Fixed keys cannot use a **shared quota** plan: every key of such a plan sees the whole pool's quota and usage, so per-key reservations would count the pool repeatedly. Saving the CC settings, binding a fixed key to a shared plan, and switching a fixed key's plan to a shared quota are all refused.
 - **Remainder key**: may only use what the pool has left after the fixed keys' reservations, optionally under its own weekly cap.
 
 ### Estimation

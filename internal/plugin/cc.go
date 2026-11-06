@@ -156,11 +156,12 @@ func (h *ccHost) KeyInfo(scope string) (ccbilling.KeyInfo, bool) {
 		return ccbilling.KeyInfo{Seq: seq}, false
 	}
 	info := ccbilling.KeyInfo{Preview: view.Preview, Label: view.Label, PlanID: view.PlanID, Seq: seq}
-	for _, plan := range h.app.store.Plans() {
-		if plan.ID == view.PlanID {
-			revision, _ := json.Marshal(plan)
-			info.PlanRevision = string(revision)
-		}
+	if plan, found := h.app.store.PlanByID(view.PlanID); found {
+		// Only the plan's configuration: its pool cycles and quota view change
+		// with every request and would invalidate the alignment cache.
+		revision, _ := json.Marshal(plan)
+		info.PlanRevision = string(revision)
+		info.SharedQuota = plan.SharedQuota
 	}
 	rate := h.app.store.Config().CNYPerUSD
 	for _, window := range view.Windows {
@@ -766,6 +767,57 @@ func (a *App) ccReportBlock(scope string, decision ccbilling.Decision) {
 }
 
 // ccKeyKind is a key's CC split type for the API key page.
+// ccRefuseSharedPlan refuses a plan change that would leave a CC fixed key on
+// a shared quota plan: creating or editing a shared plan with fixed keys among
+// its keys, switching such a plan to a shared quota, or binding a fixed key to
+// a shared plan. The CC settings check refuses the other direction.
+func (a *App) ccRefuseSharedPlan(plan string, shared bool, scopes []string) (ManagementResponse, bool) {
+	if a.cc == nil || !shared {
+		return ManagementResponse{}, false
+	}
+	for _, scope := range scopes {
+		scope = strings.ToLower(strings.TrimSpace(scope))
+		if a.cc.KeyKind(scope) != ccbilling.KeyFixed {
+			continue
+		}
+		label := scope
+		if view, ok := a.store.KeyViewForScope(scope); ok && view.Preview != "" {
+			label = view.Preview
+		}
+		err := messages.Errorf("Subscription plan %q cannot share quota while CC fixed key %s is bound to it; give the fixed key a plan without shared quota", plan, label)
+		return jsonMessageError(http.StatusConflict, string(billing.KindConflict), messages.FromError(err)), true
+	}
+	return ManagementResponse{}, false
+}
+
+// ccRefuseSharedPlanUpdate applies ccRefuseSharedPlan to a plan edit: the
+// edit's shared setting and key selection, or the plan's current ones.
+func (a *App) ccRefuseSharedPlanUpdate(patch billing.PlanPatch, scopes *[]string) (ManagementResponse, bool) {
+	plan, found := a.store.PlanByID(patch.ID)
+	if !found {
+		// The store reports the missing plan.
+		return ManagementResponse{}, false
+	}
+	shared := plan.SharedQuota
+	if patch.SharedQuota != nil {
+		shared = *patch.SharedQuota
+	}
+	if !shared {
+		return ManagementResponse{}, false
+	}
+	var members []string
+	if scopes != nil {
+		members = *scopes
+	} else {
+		for _, key := range a.store.KeyViews() {
+			if key.PlanID == plan.ID && key.DeletedAt.IsZero() {
+				members = append(members, key.Scope)
+			}
+		}
+	}
+	return a.ccRefuseSharedPlan(plan.ID, shared, members)
+}
+
 func (a *App) ccKeyKind(scope string) string {
 	if a.cc == nil {
 		return ""

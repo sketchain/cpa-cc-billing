@@ -141,7 +141,7 @@ func TestCCInsightEndpoints(t *testing.T) {
 		CC ccbilling.View `json:"cc"`
 	}
 	callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, &settingsBefore)
-	plansBefore, _ := json.Marshal(app.store.Plans())
+	plansBefore, _ := json.Marshal(app.store.PlanViews())
 	keysBefore, _ := json.Marshal(app.store.KeyViews())
 	tablesBefore := ccTables(t, app)
 	usage := 50.0
@@ -163,7 +163,7 @@ func TestCCInsightEndpoints(t *testing.T) {
 	if after := ccTables(t, app); after != tablesBefore {
 		t.Fatalf("the simulation changed the CC tables:\nbefore %s\nafter %s", tablesBefore, after)
 	}
-	plansAfter, _ := json.Marshal(app.store.Plans())
+	plansAfter, _ := json.Marshal(app.store.PlanViews())
 	keysAfter, _ := json.Marshal(app.store.KeyViews())
 	var settingsAfter struct {
 		CC ccbilling.View `json:"cc"`

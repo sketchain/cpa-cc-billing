@@ -249,8 +249,8 @@ func TestCCFixedKeyCycleFollowsAccountAndSurvivesEarlyReset(t *testing.T) {
 	if response := ccAdmit(t, app, ccFixedKey); response.Terminate {
 		t.Fatalf("fixed key refused: %s", response.ResponseBody)
 	}
-	plans := app.store.Plans()
-	if anchor := plans[0].Windows[0].CycleAnchorAt; !anchor.Equal(reset7d) {
+	plan, _ := app.store.PlanByID("fixed-a")
+	if anchor := plan.Windows[0].CycleAnchorAt; !anchor.Equal(reset7d) {
 		t.Fatalf("anchor = %v, want %v", anchor, reset7d)
 	}
 	window := weeklyWindow(t, app, scope)
@@ -680,4 +680,341 @@ func TestCCQuotaWeightEndpoints(t *testing.T) {
 	if estimates.Estimates.Basis != ccbilling.BasisRaw || len(estimates.Estimates.Accounts) != 1 || len(estimates.Estimates.Weights) != 1 {
 		t.Fatalf("estimates = %+v", estimates.Estimates)
 	}
+}
+
+// The plan revision covers the plan's configuration only: requests change its
+// pool cycles and quota view, not the revision the alignment cache keys on.
+func TestCCKeyInfoPlanRevisionIgnoresUsage(t *testing.T) {
+	app, clock := newCCTestApp(t)
+	host := &ccHost{app: app}
+	scope := billing.CallerScope(ccRemainderKey)
+	if _, err := app.store.CreatePlanWithBindings(billing.Plan{ID: "pool", Name: "Pool", Windows: []billing.QuotaWindow{
+		{Name: "Week", PeriodSeconds: weekSeconds, Amount: 100, CycleAnchorAt: clock.now.Add(3 * 24 * time.Hour)},
+	}}, []string{scope}); err != nil {
+		t.Fatal(err)
+	}
+	revision := func() string {
+		t.Helper()
+		info, ok := host.KeyInfo(scope)
+		if !ok || info.PlanID != "pool" || info.PlanRevision == "" {
+			t.Fatalf("key info = %+v, %v", info, ok)
+		}
+		return info.PlanRevision
+	}
+	before := revision()
+	shared := true
+	if _, err := app.store.UpdatePlanWithBindings(billing.PlanPatch{ID: "pool", SharedQuota: &shared}, nil); err != nil {
+		t.Fatal(err)
+	}
+	sharedRevision := revision()
+	if sharedRevision == before {
+		t.Fatal("switching the plan to a shared quota kept its revision")
+	}
+	if decision := app.store.Authorize(scope, clock.now); !decision.Allowed {
+		t.Fatalf("admission = %+v", decision)
+	}
+	ccUsage(t, app, ccRemainderKey, 2, 0.1, 0.2, clock.now.Add(time.Hour), clock.now.Add(3*24*time.Hour))
+	clock.now = clock.now.Add(time.Minute)
+	if after := revision(); after != sharedRevision {
+		t.Fatalf("usage changed the plan revision:\n%s\n%s", sharedRevision, after)
+	}
+	plan, _ := app.store.PlanByID("pool")
+	spent := 0.0
+	for _, cycle := range plan.Cycles {
+		spent += cycle.Spending.USD
+	}
+	if len(plan.Cycles) != 1 || spent <= 0 {
+		t.Fatalf("the shared pool did not record the usage: %+v", plan.Cycles)
+	}
+}
+
+// A shared pool's cycle can run while no member has a key cycle. Aligning
+// the plan then waits for the pool cycle instead of failing to save a pool
+// cycle off the new anchor's grid, and moving the anchor afterwards clears
+// both the pool's and the keys' cycles.
+func TestCCAlignWaitsForSharedPoolCycle(t *testing.T) {
+	app, clock := newCCTestApp(t)
+	first, second := billing.CallerScope(ccRemainderKey), billing.CallerScope("sk-cc-shared-member")
+	if _, err := app.store.SyncKeys([]string{ccFixedKey, ccRemainderKey, "sk-cc-shared-member"}, false); err != nil {
+		t.Fatal(err)
+	}
+	anchor := clock.now.Add(5 * 24 * time.Hour)
+	if _, err := app.store.CreatePlanWithBindings(billing.Plan{ID: "shared", Name: "Shared", SharedQuota: true, Windows: []billing.QuotaWindow{
+		{Name: "Week", PeriodSeconds: weekSeconds, Amount: 100, CycleAnchorAt: anchor},
+	}}, []string{first}); err != nil {
+		t.Fatal(err)
+	}
+	if decision := app.store.Authorize(first, clock.now); !decision.Allowed {
+		t.Fatalf("admission = %+v", decision)
+	}
+	// The member leaves; the pool cycle stays, and the new member has none.
+	if err := app.store.UnbindKey(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.BindKey(second, "shared"); err != nil {
+		t.Fatal(err)
+	}
+	// The anchor is within a week ahead, so the running pool cycle ends there.
+	poolEnd := anchor
+	resetAt := clock.now.Add(36*time.Hour + 17*time.Minute)
+	result, err := app.store.AlignWindowAnchor("shared", weekSeconds, resetAt)
+	if err != nil || result.Status != billing.AnchorWaiting || !result.WaitUntil.Equal(poolEnd) {
+		t.Fatalf("alignment = %+v, %v; want waiting until %v", result, err, poolEnd)
+	}
+	if plan, _ := app.store.PlanByID("shared"); !plan.Windows[0].CycleAnchorAt.Equal(anchor) || len(plan.Cycles) != 1 {
+		t.Fatalf("waiting changed the plan: %+v", plan)
+	}
+
+	// Once the pool cycle has ended, without any admission settling it, the
+	// anchor moves and no stale cycle remains on the plan or its keys.
+	clock.now = poolEnd.Add(time.Minute)
+	resetAt = clock.now.Add(36*time.Hour + 17*time.Minute)
+	result, err = app.store.AlignWindowAnchor("shared", weekSeconds, resetAt)
+	if err != nil || result.Status != billing.AnchorChanged {
+		t.Fatalf("alignment = %+v, %v; want changed", result, err)
+	}
+	plan, _ := app.store.PlanByID("shared")
+	if !plan.Windows[0].CycleAnchorAt.Equal(resetAt) || len(plan.Cycles) != 0 {
+		t.Fatalf("aligned plan = %+v", plan)
+	}
+	if view, ok := app.store.KeyViewForScope(second); !ok || view.PlanID != "shared" || !view.Windows[0].StartAt.Add(ccbilling.Week).Equal(resetAt) {
+		t.Fatalf("member view after alignment = %+v", view)
+	}
+	// The new schedule persists and reloads.
+	if decision := app.store.Authorize(second, clock.now); !decision.Allowed {
+		t.Fatalf("admission after alignment = %+v", decision)
+	}
+	if plan, _ := app.store.PlanByID("shared"); len(plan.Cycles) != 1 || !plan.Cycles[plan.Windows[0].ID].EndAt.Equal(resetAt) {
+		t.Fatalf("pool cycle after alignment = %+v", plan.Cycles)
+	}
+}
+
+type messageFailure struct {
+	Error struct {
+		Key    string            `json:"message_key"`
+		Params map[string]string `json:"message_params"`
+	} `json:"error"`
+}
+
+// CC fixed keys may not use a shared quota plan: the CC settings refuse such
+// a key, and plan edits refuse to put a fixed key on a shared plan.
+func TestCCFixedKeysRejectSharedQuotaPlans(t *testing.T) {
+	app, clock := newCCTestApp(t)
+	fixed := billing.CallerScope(ccFixedKey)
+	const spare = "sk-cc-spare-0003"
+	if _, err := app.store.SyncKeys([]string{ccFixedKey, ccRemainderKey, spare}, false); err != nil {
+		t.Fatal(err)
+	}
+	anchor := clock.now.Add(3 * 24 * time.Hour)
+	week := []billing.QuotaWindow{{Name: "Week", PeriodSeconds: weekSeconds, Amount: 50, CycleAnchorAt: anchor}}
+	fixedPlan, _ := app.store.PlanByID("fixed-a")
+	fixedWeek := slices.Clone(fixedPlan.Windows)
+	fixedWeek[0].CycleAnchorAt = anchor
+	if _, err := app.store.CreatePlanWithBindings(billing.Plan{ID: "pool", Name: "Pool", SharedQuota: true, Windows: week},
+		[]string{billing.CallerScope(spare)}); err != nil {
+		t.Fatal(err)
+	}
+	expect := func(failure messageFailure, key string) {
+		t.Helper()
+		if failure.Error.Key != key || failure.Error.Params["v0"] == "" || failure.Error.Params["v1"] == "" {
+			t.Fatalf("error = %+v, want %s", failure.Error, key)
+		}
+	}
+
+	// Plan edits that would put the fixed key on a shared plan.
+	var failure messageFailure
+	callOK(t, app, http.MethodPost, routeKeysBind, nil, map[string]string{"scope": fixed, "plan_id": "pool"}, http.StatusConflict, &failure)
+	expect(failure, "backend.cc_shared_plan_has_fixed_key")
+	failure = messageFailure{}
+	callOK(t, app, http.MethodPatch, routePlans, nil, map[string]any{"id": "pool", "scopes": []string{billing.CallerScope(spare), fixed}},
+		http.StatusConflict, &failure)
+	expect(failure, "backend.cc_shared_plan_has_fixed_key")
+	failure = messageFailure{}
+	callOK(t, app, http.MethodPatch, routePlans, nil, map[string]any{"id": "fixed-a", "shared_quota": true, "windows": fixedWeek},
+		http.StatusConflict, &failure)
+	expect(failure, "backend.cc_shared_plan_has_fixed_key")
+	failure = messageFailure{}
+	callOK(t, app, http.MethodPost, routePlans, nil, map[string]any{"name": "New pool", "shared_quota": true, "windows": week, "scopes": []string{fixed}},
+		http.StatusConflict, &failure)
+	expect(failure, "backend.cc_shared_plan_has_fixed_key")
+	if key, _ := app.store.KeyViewForScope(fixed); key.PlanID != "fixed-a" {
+		t.Fatalf("a refused edit rebound the fixed key to %q", key.PlanID)
+	}
+	if plan, _ := app.store.PlanByID("fixed-a"); plan.SharedQuota {
+		t.Fatal("a refused edit made the fixed key's plan shared")
+	}
+	// Edits that keep fixed keys off shared plans still work.
+	callOK(t, app, http.MethodPatch, routePlans, nil, map[string]any{"id": "pool", "name": "Pool 2"}, http.StatusOK, nil)
+	callOK(t, app, http.MethodPost, routeKeysBind, nil, map[string]string{"scope": billing.CallerScope(ccRemainderKey), "plan_id": "pool"}, http.StatusOK, nil)
+	callOK(t, app, http.MethodPatch, routePlans, nil, map[string]any{"id": "fixed-a", "name": "Fixed A2"}, http.StatusOK, nil)
+
+	// A fixed key that ends up on a shared plan anyway, here through the
+	// store, makes the CC settings unsavable and the CC page warn.
+	shared := true
+	if _, err := app.store.UpdatePlanWithBindings(billing.PlanPatch{ID: "fixed-a", SharedQuota: &shared, Windows: &fixedWeek}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var view struct {
+		CC ccbilling.View `json:"cc"`
+	}
+	callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, &view)
+	if len(view.CC.Warnings) != 1 || view.CC.Warnings[0].Key != "backend.cc_fixed_key_shared_plan_warning" {
+		t.Fatalf("CC warnings = %+v", view.CC.Warnings)
+	}
+	failure = messageFailure{}
+	callOK(t, app, http.MethodPut, routeCCConfig, nil, view.CC.Settings, http.StatusBadRequest, &failure)
+	expect(failure, "backend.cc_fixed_key_on_shared_plan")
+	callOK(t, app, http.MethodPost, routeCCRefresh, nil, nil, http.StatusOK, nil)
+	var page struct {
+		Entries []struct {
+			Message string `json:"message"`
+		} `json:"entries"`
+	}
+	callOK(t, app, http.MethodGet, routePluginLogs, url.Values{"level": {"all"}}, nil, http.StatusOK, &page)
+	logged := 0
+	for _, entry := range page.Entries {
+		if strings.Contains(entry.Message, "is bound to shared quota plan") {
+			logged++
+		}
+	}
+	if logged != 1 {
+		t.Fatalf("shared plan logged %d times, want once", logged)
+	}
+
+	// Switching the plan back clears the warning and the settings save again.
+	shared = false
+	if _, err := app.store.UpdatePlanWithBindings(billing.PlanPatch{ID: "fixed-a", SharedQuota: &shared}, nil); err != nil {
+		t.Fatal(err)
+	}
+	callOK(t, app, http.MethodPut, routeCCConfig, nil, view.CC.Settings, http.StatusOK, nil)
+	callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, &view)
+	if len(view.CC.Warnings) != 0 {
+		t.Fatalf("CC warnings after unsharing = %+v", view.CC.Warnings)
+	}
+}
+
+func openStateFile(t *testing.T, path string, clock *ccTestClock) *App {
+	t.Helper()
+	app := newTestApp(t)
+	t.Cleanup(app.Shutdown)
+	if clock != nil {
+		app.store.SetClock(clock.Now)
+	}
+	if _, err := app.HandleMethod(MethodPluginRegister, mustMarshal(t, LifecycleRequest{
+		ConfigYAML: []byte("enabled: true\nstate_file: \"" + path + "\"\n"),
+	})); err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
+func ccMetaValue(t *testing.T, path, key string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var value string
+	if err := db.QueryRow(`SELECT value FROM cc_meta WHERE key = ?`, key).Scan(&value); err != nil {
+		t.Fatalf("cc_meta %s: %v", key, err)
+	}
+	return value
+}
+
+// The billing schema upgrade to version 25 (shared quota plans) and the CC
+// tables, versioned separately in cc_meta, leave each other alone: a
+// database of upstream schema 25 with a shared pool opens with its pool, a
+// database of this fork's previous release (schema 24 with CC tables)
+// upgrades with its CC settings intact, and a new file gets both.
+func TestCCDatabasesAcrossTheSharedQuotaSchema(t *testing.T) {
+	clock := &ccTestClock{now: time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)}
+	anchor := clock.now.Add(2 * 24 * time.Hour)
+	member := billing.CallerScope(ccRemainderKey)
+
+	t.Run("upstream schema 25 with a shared pool", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "cpa-key-billing-state-v1.db")
+		legacy := openStateFile(t, path, clock)
+		if _, err := legacy.store.SyncKeys([]string{ccRemainderKey}, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := legacy.store.CreatePlanWithBindings(billing.Plan{ID: "pool", Name: "Pool", SharedQuota: true, Windows: []billing.QuotaWindow{
+			{Name: "Week", PeriodSeconds: weekSeconds, Amount: 50, CycleAnchorAt: anchor},
+		}}, []string{member}); err != nil {
+			t.Fatal(err)
+		}
+		if decision := legacy.store.Authorize(member, clock.now); !decision.Allowed {
+			t.Fatalf("admission = %+v", decision)
+		}
+		legacy.Shutdown()
+		if version := sqliteUserVersion(t, path); version != 25 {
+			t.Fatalf("billing schema = %d, want 25", version)
+		}
+
+		app := openStateFile(t, path, clock)
+		callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, nil)
+		plan, found := app.store.PlanByID("pool")
+		if !found || !plan.SharedQuota || len(plan.Cycles) != 1 {
+			t.Fatalf("shared pool after reopening = %+v", plan)
+		}
+		app.Shutdown()
+		if version := sqliteUserVersion(t, path); version != 25 {
+			t.Fatalf("billing schema after the CC tables = %d", version)
+		}
+		if ccMetaValue(t, path, "schema_version") == "" {
+			t.Fatal("CC tables missing")
+		}
+	})
+
+	t.Run("previous release at schema 24 with CC tables", func(t *testing.T) {
+		app, _ := newCCTestApp(t)
+		path := app.store.Config().StateFile
+		settingsBefore := ccMetaValue(t, path, "settings")
+		app.Shutdown()
+		db, err := sql.Open("sqlite3", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`ALTER TABLE plans DROP COLUMN shared_quota; ALTER TABLE plans DROP COLUMN cycles_json; PRAGMA user_version = 24;`); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+		ccVersion := ccMetaValue(t, path, "schema_version")
+
+		upgraded := openStateFile(t, path, nil)
+		var view struct {
+			CC ccbilling.View `json:"cc"`
+		}
+		callOK(t, upgraded, http.MethodGet, routeCC, nil, nil, http.StatusOK, &view)
+		if key := view.CC.Settings.Keys[billing.CallerScope(ccFixedKey)]; key.Kind != ccbilling.KeyFixed || key.PoolID != "main" {
+			t.Fatalf("CC settings after the upgrade = %+v", view.CC.Settings)
+		}
+		plan, found := upgraded.store.PlanByID("fixed-a")
+		if !found || plan.SharedQuota || plan.Windows[0].Amount != 100 {
+			t.Fatalf("plan after the upgrade = %+v", plan)
+		}
+		upgraded.Shutdown()
+		if version := sqliteUserVersion(t, path); version != 25 {
+			t.Fatalf("billing schema after the upgrade = %d, want 25", version)
+		}
+		if after := ccMetaValue(t, path, "schema_version"); after != ccVersion {
+			t.Fatalf("CC schema changed from %s to %s", ccVersion, after)
+		}
+		if after := ccMetaValue(t, path, "settings"); after != settingsBefore {
+			t.Fatalf("CC settings changed:\n%s\n%s", settingsBefore, after)
+		}
+	})
+
+	t.Run("new database", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "cpa-cc-billing-state-v1.db")
+		app := openStateFile(t, path, clock)
+		callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, nil)
+		app.Shutdown()
+		if version := sqliteUserVersion(t, path); version != 25 {
+			t.Fatalf("billing schema = %d, want 25", version)
+		}
+		if ccMetaValue(t, path, "schema_version") == "" {
+			t.Fatal("CC tables missing")
+		}
+	})
 }

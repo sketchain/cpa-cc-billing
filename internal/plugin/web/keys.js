@@ -91,10 +91,20 @@ function setSelectedConcurrency(keys, raw) {
   });
 }
 
+// Resetting a key of a shared plan clears the whole pool, so every live key of
+// that plan is affected, selected or not.
+function quotaResetAffectedKeys(keys) {
+  const pools = new Set(keys.filter((key) => key.shared_quota && key.plan_id).map((key) => key.plan_id));
+  if (!pools.size) return keys;
+  const selected = new Set(keys.map((key) => key.scope));
+  const members = (resources.admin.keys.value || []).filter((key) => !key.deleted_at && pools.has(key.plan_id) && !selected.has(key.scope));
+  return keys.concat(members);
+}
+
 // Resetting a CC fixed key grants it a full new week, which the pool reserves
 // again although the Claude accounts recovered nothing.
 function withFixedKeyResetWarning(note, keys) {
-  const fixed = keys.filter((key) => key.cc_kind === "fixed").length;
+  const fixed = quotaResetAffectedKeys(keys).filter((key) => key.cc_kind === "fixed").length;
   if (!fixed) return note;
   return el(
     "div",
@@ -105,16 +115,9 @@ function withFixedKeyResetWarning(note, keys) {
 }
 
 function resetSelectedKeys(keys) {
-  const shared = keys.filter((key) => key.windows[0]?.cycle_anchor_at).length;
-  const note =
-    shared === keys.length
-      ? m("ui.clear_usage_in_all_windows_and_keep_the_scheduled_reset_times")
-      : shared === 0
-        ? m("ui.all_quota_cycles_will_end_new_cycles_start_when_the_next_request_is_admitted")
-        : m("ui.batch_reset_mixed_cycles");
   return openActionDialog(
     m("ui.batch_reset_subscription_quota", { count: keys.length }),
-    withFixedKeyResetWarning(note, keys),
+    withFixedKeyResetWarning(quotaResetNote(keys), keys),
     undefined,
     () =>
       keySelection.run(keys, (_, group) => writeAdmin("POST", "/keys/reset", { mode: "all", scopes: group.map((key) => key.scope) }), {
@@ -273,12 +276,7 @@ function renderKeys() {
             onclick: () =>
               openActionDialog(
                 m("ui.reset_subscription_quota"),
-                withFixedKeyResetWarning(
-                  view.windows[0]?.cycle_anchor_at
-                    ? m("ui.clear_usage_in_all_windows_and_keep_the_scheduled_reset_times")
-                    : m("ui.all_quota_cycles_will_end_new_cycles_start_when_the_next_request_is_admitted"),
-                  [view]
-                ),
+                withFixedKeyResetWarning(quotaResetNote([view]), [view]),
                 undefined,
                 async () => {
                   await mutateAdmin("POST", "/keys/reset", { mode: "all", scopes: [view.scope] });
@@ -458,6 +456,6 @@ $("keys-reset-all").onclick = () =>
     undefined,
     async () => {
       const result = await mutateAdmin("POST", "/keys/reset", { mode: "global" });
-      notify(result.keys ? m("ui.reset_quotas_for_value_api_keys", { v0: result.keys }) : m("ui.no_quotas_to_reset"));
+      notify(result.keys || result.pools ? m("ui.subscription_quota_reset") : m("ui.no_quotas_to_reset"));
     }
   );
