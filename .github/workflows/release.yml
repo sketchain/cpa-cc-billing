@@ -35,6 +35,11 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    # Linux and Windows builds pin the baseline instruction set, for Go
+    # (go_cpu) and for the C code cgo compiles (march), so a library built on
+    # a recent runner loads without SIGILL on older CPUs and virtual machines.
+    # macOS builds keep the toolchain defaults, which target the oldest CPUs
+    # each macOS architecture supports.
     strategy:
       fail-fast: false
       matrix:
@@ -55,12 +60,16 @@ jobs:
             arch: amd64
             extension: so
             image: quay.io/pypa/manylinux2014_x86_64
+            go_cpu: GOAMD64=v1
+            march: x86-64
           - target: linux-arm64
             runner: ubuntu-24.04-arm
             os: linux
             arch: arm64
             extension: so
             image: quay.io/pypa/manylinux2014_aarch64
+            go_cpu: GOARM64=v8.0
+            march: armv8-a
           - target: windows-amd64
             runner: windows-2025
             os: windows
@@ -68,6 +77,8 @@ jobs:
             extension: dll
             cc: gcc
             cc_target: x86_64-w64-mingw32
+            go_cpu: GOAMD64=v1
+            march: x86-64
             objdump: objdump
             cache_salt: runner-ucrt-gcc
           - target: windows-arm64
@@ -77,6 +88,8 @@ jobs:
             extension: dll
             cc: aarch64-w64-mingw32-gcc
             cc_target: aarch64-w64-windows-gnu
+            go_cpu: GOARM64=v8.0
+            march: armv8-a
             objdump: llvm-objdump
             cache_salt: llvm-mingw-20260616
 
@@ -190,6 +203,8 @@ jobs:
         env:
           TARGET_ARCH: ${{ matrix.arch }}
           TARGET_IMAGE: ${{ matrix.image }}
+          TARGET_GO_CPU: ${{ matrix.go_cpu }}
+          TARGET_MARCH: ${{ matrix.march }}
         run: |
           mkdir -p dist
           go_root="$(go env GOROOT)"
@@ -199,12 +214,13 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$GITHUB_WORKSPACE:/src" -w /src \
             -v "$go_root:/opt/go:ro" \
-            -e HOME=/tmp -e GOROOT=/opt/go -e TARGET_ARCH \
+            -e HOME=/tmp -e GOROOT=/opt/go -e TARGET_ARCH -e TARGET_GO_CPU -e TARGET_MARCH \
             -e GOCACHE="/src/.cache/manylinux-${TARGET_ARCH}/build" \
             -e GOMODCACHE="/src/.cache/manylinux-${TARGET_ARCH}/mod" \
             "$TARGET_IMAGE" \
             bash -euo pipefail -c '
               export PATH="$GOROOT/bin:$PATH"
+              export "${TARGET_GO_CPU:?}" CGO_CFLAGS="-O2 -g -march=${TARGET_MARCH:?}"
               CGO_ENABLED=1 GOOS=linux GOARCH="$TARGET_ARCH" \
                 go build -buildvcs=false -trimpath -ldflags="-s -w -buildid=" \
                 -tags cshared -buildmode=c-shared \
@@ -219,6 +235,8 @@ jobs:
           TARGET_ARCH: ${{ matrix.arch }}
           TARGET_CC: ${{ matrix.cc }}
           EXPECTED_CC_TARGET: ${{ matrix.cc_target }}
+          TARGET_GO_CPU: ${{ matrix.go_cpu }}
+          TARGET_MARCH: ${{ matrix.march }}
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           & $env:TARGET_CC --version
@@ -234,6 +252,12 @@ jobs:
           $env:GOOS = "windows"
           $env:GOARCH = $env:TARGET_ARCH
           $env:CC = $env:TARGET_CC
+          $goCpuName, $goCpuValue = $env:TARGET_GO_CPU -split '=', 2
+          if (-not $goCpuName -or -not $goCpuValue -or -not $env:TARGET_MARCH) {
+            throw "Missing CPU baseline for $($env:TARGET_ARCH)"
+          }
+          Set-Item -Path "Env:$goCpuName" -Value $goCpuValue
+          $env:CGO_CFLAGS = "-O2 -g -march=$($env:TARGET_MARCH)"
           go build -buildvcs=false -trimpath -ldflags="-s -w -buildid=" `
             -tags cshared -buildmode=c-shared `
             -o dist/cpa-cc-billing.dll ./cmd/cpa-cc-billing
@@ -255,10 +279,14 @@ jobs:
           TARGET_OS: ${{ matrix.os }}
           TARGET_ARCH: ${{ matrix.arch }}
           EXTENSION: ${{ matrix.extension }}
+          TARGET_GO_CPU: ${{ matrix.go_cpu }}
         run: |
           binary="dist/cpa-cc-billing.${EXTENSION}"
           test -s "$binary"
           file "$binary"
+          if [ -n "$TARGET_GO_CPU" ]; then
+            go version -m "$binary" | grep -Eq "^[[:space:]]*build[[:space:]]+${TARGET_GO_CPU}\$"
+          fi
           version="${RELEASE_TAG#v}"
 
           release_archive="cpa-cc-billing_${version}_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
@@ -276,12 +304,21 @@ jobs:
           TARGET_ARCH: ${{ matrix.arch }}
           EXTENSION: ${{ matrix.extension }}
           TARGET_OBJDUMP: ${{ matrix.objdump }}
+          TARGET_GO_CPU: ${{ matrix.go_cpu }}
         run: |
           $binary = "dist/cpa-cc-billing.$($env:EXTENSION)"
           if (-not (Test-Path $binary) -or (Get-Item $binary).Length -eq 0) {
             throw "Missing or empty plugin binary: $binary"
           }
           Get-Item $binary
+
+          $buildInfo = go version -m $binary
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to read the plugin build information"
+          }
+          if (-not ($buildInfo | Select-String -Pattern "^\s*build\s+$([regex]::Escape($env:TARGET_GO_CPU))$" -Quiet)) {
+            throw "Plugin binary was not built with $($env:TARGET_GO_CPU)"
+          }
 
           $exports = & $env:TARGET_OBJDUMP -p $binary
           if ($LASTEXITCODE -ne 0) {
