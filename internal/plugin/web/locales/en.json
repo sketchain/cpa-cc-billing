@@ -957,7 +957,7 @@
   "cc.set_anchor": "Set as anchor",
   "cc.account_in_other_pool": "Already in pool {v0}; an account can belong to only one pool",
   "cc.in_pool_value": "(pool {v0})",
-  "ui.cc_fixed_key_reset_warning": "{v0} of these keys are CC fixed keys. A reset gives each of them a whole new week of quota and enlarges the pool's weekly reservation, but the Claude accounts' actual quota does not recover.",
+  "ui.cc_fixed_key_reset_warning": "This reset affects {v0} CC fixed keys, including keys of a shared quota pool that are not selected. A reset gives each of them a whole new week of quota and enlarges the pool's weekly reservation, but the Claude accounts' actual quota does not recover.",
   "backend.auth_index_is_required": "auth_index is required",
   "backend.the_account_is_not_configured_in_the_cc_split": "The account is not configured in the CC split",
   "cc.trend_title": "Quota trend",

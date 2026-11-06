@@ -55,10 +55,15 @@ function renderPlans() {
                 class: "link",
                 text: m("ui.reset"),
                 onclick: () =>
-                  openActionDialog(m("ui.reset_shared_quota"), m("ui.reset_shared_quota_note"), undefined, async () => {
-                    await mutateAdmin("POST", "/plans/reset", { id: plan.id });
-                    notify(m("ui.subscription_quota_reset"));
-                  })
+                  openActionDialog(
+                    m("ui.reset_shared_quota"),
+                    withFixedKeyResetWarning(m("ui.reset_shared_quota_note"), boundKeys.filter((key) => !key.deleted_at)),
+                    undefined,
+                    async () => {
+                      await mutateAdmin("POST", "/plans/reset", { id: plan.id });
+                      notify(m("ui.subscription_quota_reset"));
+                    }
+                  )
               })
             ]
           : []

@@ -91,10 +91,20 @@ function setSelectedConcurrency(keys, raw) {
   });
 }
 
+// Resetting a key of a shared plan clears the whole pool, so every live key of
+// that plan is affected, selected or not.
+function quotaResetAffectedKeys(keys) {
+  const pools = new Set(keys.filter((key) => key.shared_quota && key.plan_id).map((key) => key.plan_id));
+  if (!pools.size) return keys;
+  const selected = new Set(keys.map((key) => key.scope));
+  const members = (resources.admin.keys.value || []).filter((key) => !key.deleted_at && pools.has(key.plan_id) && !selected.has(key.scope));
+  return keys.concat(members);
+}
+
 // Resetting a CC fixed key grants it a full new week, which the pool reserves
 // again although the Claude accounts recovered nothing.
 function withFixedKeyResetWarning(note, keys) {
-  const fixed = keys.filter((key) => key.cc_kind === "fixed").length;
+  const fixed = quotaResetAffectedKeys(keys).filter((key) => key.cc_kind === "fixed").length;
   if (!fixed) return note;
   return el(
     "div",

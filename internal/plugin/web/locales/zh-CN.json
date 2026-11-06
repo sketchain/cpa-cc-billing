@@ -957,7 +957,7 @@
   "cc.set_anchor": "设为锚定",
   "cc.account_in_other_pool": "已在池 {v0} 里，一个账号只能属于一个池",
   "cc.in_pool_value": "（池 {v0}）",
-  "ui.cc_fixed_key_reset_warning": "其中 {v0} 个是 CC 固定 key。重置会让它们各自获得一整周的新额度、扩大池的周预留，但 Claude 账号的实际额度并不会恢复。",
+  "ui.cc_fixed_key_reset_warning": "本次重置会影响 {v0} 个 CC 固定 key（包括同一共享额度池中未选中的 key）。重置会让它们各自获得一整周的新额度、扩大池的周预留，但 Claude 账号的实际额度并不会恢复。",
   "backend.auth_index_is_required": "缺少 auth_index 参数",
   "backend.the_account_is_not_configured_in_the_cc_split": "该账号不在 CC 分账设置中",
   "cc.trend_title": "额度趋势",
