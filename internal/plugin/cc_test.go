@@ -727,3 +727,64 @@ func TestCCKeyInfoPlanRevisionIgnoresUsage(t *testing.T) {
 		t.Fatalf("the shared pool did not record the usage: %+v", plan.Cycles)
 	}
 }
+
+// A shared pool's cycle can run while no member has a key cycle. Aligning
+// the plan then waits for the pool cycle instead of failing to save a pool
+// cycle off the new anchor's grid, and moving the anchor afterwards clears
+// both the pool's and the keys' cycles.
+func TestCCAlignWaitsForSharedPoolCycle(t *testing.T) {
+	app, clock := newCCTestApp(t)
+	first, second := billing.CallerScope(ccRemainderKey), billing.CallerScope("sk-cc-shared-member")
+	if _, err := app.store.SyncKeys([]string{ccFixedKey, ccRemainderKey, "sk-cc-shared-member"}, false); err != nil {
+		t.Fatal(err)
+	}
+	anchor := clock.now.Add(5 * 24 * time.Hour)
+	if _, err := app.store.CreatePlanWithBindings(billing.Plan{ID: "shared", Name: "Shared", SharedQuota: true, Windows: []billing.QuotaWindow{
+		{Name: "Week", PeriodSeconds: weekSeconds, Amount: 100, CycleAnchorAt: anchor},
+	}}, []string{first}); err != nil {
+		t.Fatal(err)
+	}
+	if decision := app.store.Authorize(first, clock.now); !decision.Allowed {
+		t.Fatalf("admission = %+v", decision)
+	}
+	// The member leaves; the pool cycle stays, and the new member has none.
+	if err := app.store.UnbindKey(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.BindKey(second, "shared"); err != nil {
+		t.Fatal(err)
+	}
+	// The anchor is within a week ahead, so the running pool cycle ends there.
+	poolEnd := anchor
+	resetAt := clock.now.Add(36*time.Hour + 17*time.Minute)
+	result, err := app.store.AlignWindowAnchor("shared", weekSeconds, resetAt)
+	if err != nil || result.Status != billing.AnchorWaiting || !result.WaitUntil.Equal(poolEnd) {
+		t.Fatalf("alignment = %+v, %v; want waiting until %v", result, err, poolEnd)
+	}
+	if plan, _ := app.store.PlanByID("shared"); !plan.Windows[0].CycleAnchorAt.Equal(anchor) || len(plan.Cycles) != 1 {
+		t.Fatalf("waiting changed the plan: %+v", plan)
+	}
+
+	// Once the pool cycle has ended, without any admission settling it, the
+	// anchor moves and no stale cycle remains on the plan or its keys.
+	clock.now = poolEnd.Add(time.Minute)
+	resetAt = clock.now.Add(36*time.Hour + 17*time.Minute)
+	result, err = app.store.AlignWindowAnchor("shared", weekSeconds, resetAt)
+	if err != nil || result.Status != billing.AnchorChanged {
+		t.Fatalf("alignment = %+v, %v; want changed", result, err)
+	}
+	plan, _ := app.store.PlanByID("shared")
+	if !plan.Windows[0].CycleAnchorAt.Equal(resetAt) || len(plan.Cycles) != 0 {
+		t.Fatalf("aligned plan = %+v", plan)
+	}
+	if view, ok := app.store.KeyViewForScope(second); !ok || view.PlanID != "shared" || !view.Windows[0].StartAt.Add(ccbilling.Week).Equal(resetAt) {
+		t.Fatalf("member view after alignment = %+v", view)
+	}
+	// The new schedule persists and reloads.
+	if decision := app.store.Authorize(second, clock.now); !decision.Allowed {
+		t.Fatalf("admission after alignment = %+v", decision)
+	}
+	if plan, _ := app.store.PlanByID("shared"); len(plan.Cycles) != 1 || !plan.Cycles[plan.Windows[0].ID].EndAt.Equal(resetAt) {
+		t.Fatalf("pool cycle after alignment = %+v", plan.Cycles)
+	}
+}
