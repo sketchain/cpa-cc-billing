@@ -213,6 +213,11 @@ func (a *App) bindKey(req ManagementRequest) ManagementResponse {
 	if errDecode := decodeStrict(req.Body, &body); errDecode != nil {
 		return errorResponse(errDecode)
 	}
+	if plan, found := a.store.PlanByID(body.PlanID); found {
+		if refusal, refused := a.ccRefuseSharedPlan(plan.ID, plan.SharedQuota, []string{body.Scope}); refused {
+			return refusal
+		}
+	}
 	if errBind := a.store.BindKey(body.Scope, body.PlanID); errBind != nil {
 		return errorResponse(errBind)
 	}

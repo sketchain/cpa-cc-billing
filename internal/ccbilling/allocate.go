@@ -130,7 +130,10 @@ type PoolStatus struct {
 	Reset7d          time.Time `json:"reset_7d,omitzero"`
 }
 
-// BuildPool sums the pool's accounts and its fixed keys' reservations.
+// BuildPool sums the pool's accounts and its fixed keys' reservations. Each
+// fixed key reserves its own plan balance; fixed keys on a shared quota plan
+// are refused (see Manager.checkSharedPlans), and supporting them would mean
+// reserving each shared plan's balance once here instead of once per key.
 func BuildPool(pool Pool, accounts []AccountStatus, fixed []FixedKeyUsage) PoolStatus {
 	status := PoolStatus{ID: pool.ID, Name: pool.Name, Accounts: pool.AuthIndexes, Fixed: []FixedKeyStatus{}}
 	var weekly, fiveHour float64

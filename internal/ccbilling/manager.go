@@ -26,6 +26,10 @@ type KeyInfo struct {
 	CycleEnd    time.Time
 	// Anchored reports whether the plan's cycles start at a fixed anchor.
 	Anchored bool
+	// SharedQuota reports that the plan pools one quota across its keys, so
+	// the weekly amounts above are the whole pool's. CC fixed keys may not
+	// use such a plan.
+	SharedQuota bool
 	// PlanRevision changes whenever the key's plan does.
 	PlanRevision string
 	// Seq is the usage sequence number UsedWeekUSD includes.
@@ -138,6 +142,9 @@ type Manager struct {
 	accounts    map[string]*accountCache
 	lastRefresh time.Time
 	lastPrune   time.Time
+	// sharedLogged maps each fixed key last logged on a shared quota plan
+	// to that plan.
+	sharedLogged map[string]string
 
 	snap atomic.Pointer[snapshot]
 
@@ -559,6 +566,7 @@ func (m *Manager) refreshLocked() error {
 	}
 	m.snap.Store(snap)
 	m.lastRefresh = now
+	m.logSharedPlans(snap)
 	if !failed {
 		m.lastError.Store("")
 	}
@@ -902,7 +910,10 @@ type View struct {
 	Segments int           `json:"stored_segments"`
 	Weights  WeightsView   `json:"weights"`
 	Error    string        `json:"error,omitempty"`
-	At       time.Time     `json:"at"`
+	// Warnings are problems the settings check cannot prevent, such as a
+	// fixed key's plan switched to a shared quota after the settings saved.
+	Warnings []messages.Message `json:"warnings"`
+	At       time.Time          `json:"at"`
 	// Loaded is false while no estimate snapshot exists.
 	Loaded bool `json:"loaded"`
 }
@@ -923,7 +934,7 @@ func (m *Manager) View() (View, error) {
 			return View{}, refreshErr
 		}
 		return View{Settings: *settings, Defaults: DefaultParams(), Accounts: []AccountView{}, Pools: []PoolStatus{}, Keys: []KeyStatus{},
-			Weights: emptyWeightsView(), Error: m.lastError.Load().(string), At: now}, nil
+			Weights: emptyWeightsView(), Warnings: []messages.Message{}, Error: m.lastError.Load().(string), At: now}, nil
 	}
 	view := View{Settings: snap.settings, Defaults: DefaultParams(), Accounts: []AccountView{}, Pools: []PoolStatus{}, Keys: []KeyStatus{},
 		Error: m.lastError.Load().(string), At: now, Loaded: true}
@@ -984,6 +995,7 @@ func (m *Manager) View() (View, error) {
 		key.Reported = ReportedBalance(key.Balance)
 		view.Keys = append(view.Keys, key)
 	}
+	view.Warnings = sharedPlanWarnings(snap)
 	return view, nil
 }
 
@@ -1060,7 +1072,9 @@ func (m *Manager) admitUnloaded(scope string) Decision {
 
 // checkSharedPlans refuses fixed keys that share a subscription plan across
 // pools: aligning the plan to two anchor accounts would move its cycles back
-// and forth.
+// and forth. It also refuses fixed keys on a shared quota plan: each fixed
+// key reserves its own weekly balance, while every member of a shared plan
+// reports the whole pool's.
 func (m *Manager) checkSharedPlans(settings Settings) error {
 	type owner struct{ scope, pool string }
 	plans := map[string]owner{}
@@ -1072,6 +1086,10 @@ func (m *Manager) checkSharedPlans(settings Settings) error {
 		info, known := m.host.KeyInfo(scope)
 		if !known || info.PlanID == "" {
 			continue
+		}
+		if info.SharedQuota {
+			return messages.Errorf("CC fixed key %s is bound to shared quota plan %q; give it a plan without shared quota",
+				keyLabel(scope, m.host), info.PlanID)
 		}
 		previous, seen := plans[info.PlanID]
 		if !seen {
@@ -1099,4 +1117,50 @@ func (m *Manager) KeyKind(scope string) string {
 		return settings.Keys[scope].Kind
 	}
 	return ""
+}
+
+// sharedFixedKeys lists the fixed keys whose plan shares one quota across its
+// keys, by scope. Settings with such a key cannot be saved, but a plan can
+// still be switched afterwards or come from settings saved before the check.
+// Each of them then reports the whole pool's weekly amounts, so the pool's
+// reservations count that pool once per such key: overstated, never short.
+func sharedFixedKeys(snap *snapshot) map[string]KeyInfo {
+	result := map[string]KeyInfo{}
+	for scope, settings := range snap.settings.Keys {
+		if key := snap.keys[scope]; settings.Kind == KeyFixed && key.known && key.info.SharedQuota {
+			result[scope] = key.info
+		}
+	}
+	return result
+}
+
+func sharedPlanWarnings(snap *snapshot) []messages.Message {
+	shared := sharedFixedKeys(snap)
+	warnings := []messages.Message{}
+	for _, scope := range sortedKeys(shared) {
+		info := shared[scope]
+		warnings = append(warnings, messages.New("CC fixed key %s is bound to shared quota plan %q; its weekly reservation counts the whole shared pool and overstates the pool's reservations. Bind it to a plan without shared quota.", fixedKeyLabel(scope, info), info.PlanID))
+	}
+	return warnings
+}
+
+// logSharedPlans logs each fixed key once when its plan becomes shared.
+func (m *Manager) logSharedPlans(snap *snapshot) {
+	shared := sharedFixedKeys(snap)
+	for _, scope := range sortedKeys(shared) {
+		if info := shared[scope]; m.sharedLogged[scope] != info.PlanID {
+			m.host.Logf("CC fixed key %s is bound to shared quota plan %q; its weekly reservation counts the whole shared pool", fixedKeyLabel(scope, info), info.PlanID)
+		}
+	}
+	m.sharedLogged = map[string]string{}
+	for scope, info := range shared {
+		m.sharedLogged[scope] = info.PlanID
+	}
+}
+
+func fixedKeyLabel(scope string, info KeyInfo) string {
+	if info.Preview != "" {
+		return info.Preview
+	}
+	return scope
 }

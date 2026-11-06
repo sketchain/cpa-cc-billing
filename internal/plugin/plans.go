@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"cmp"
 	"net/http"
 	"strings"
 
@@ -14,6 +15,9 @@ func (a *App) createPlan(req ManagementRequest) ManagementResponse {
 	}
 	if errDecode := decodeStrict(req.Body, &body); errDecode != nil {
 		return errorResponse(errDecode)
+	}
+	if refusal, refused := a.ccRefuseSharedPlan(cmp.Or(strings.TrimSpace(body.ID), strings.TrimSpace(body.Name)), body.SharedQuota, body.Scopes); refused {
+		return refusal
 	}
 	stored, errCreate := a.store.CreatePlanWithBindings(body.Plan, body.Scopes)
 	if errCreate != nil {
@@ -29,6 +33,9 @@ func (a *App) updatePlan(req ManagementRequest) ManagementResponse {
 	}
 	if errDecode := decodeStrict(req.Body, &body); errDecode != nil {
 		return errorResponse(errDecode)
+	}
+	if refusal, refused := a.ccRefuseSharedPlanUpdate(body.PlanPatch, body.Scopes); refused {
+		return refusal
 	}
 	stored, errUpdate := a.store.UpdatePlanWithBindings(body.PlanPatch, body.Scopes)
 	if errUpdate != nil {

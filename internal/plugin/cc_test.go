@@ -788,3 +788,107 @@ func TestCCAlignWaitsForSharedPoolCycle(t *testing.T) {
 		t.Fatalf("pool cycle after alignment = %+v", plan.Cycles)
 	}
 }
+
+type messageFailure struct {
+	Error struct {
+		Key    string            `json:"message_key"`
+		Params map[string]string `json:"message_params"`
+	} `json:"error"`
+}
+
+// CC fixed keys may not use a shared quota plan: the CC settings refuse such
+// a key, and plan edits refuse to put a fixed key on a shared plan.
+func TestCCFixedKeysRejectSharedQuotaPlans(t *testing.T) {
+	app, clock := newCCTestApp(t)
+	fixed := billing.CallerScope(ccFixedKey)
+	const spare = "sk-cc-spare-0003"
+	if _, err := app.store.SyncKeys([]string{ccFixedKey, ccRemainderKey, spare}, false); err != nil {
+		t.Fatal(err)
+	}
+	anchor := clock.now.Add(3 * 24 * time.Hour)
+	week := []billing.QuotaWindow{{Name: "Week", PeriodSeconds: weekSeconds, Amount: 50, CycleAnchorAt: anchor}}
+	fixedPlan, _ := app.store.PlanByID("fixed-a")
+	fixedWeek := slices.Clone(fixedPlan.Windows)
+	fixedWeek[0].CycleAnchorAt = anchor
+	if _, err := app.store.CreatePlanWithBindings(billing.Plan{ID: "pool", Name: "Pool", SharedQuota: true, Windows: week},
+		[]string{billing.CallerScope(spare)}); err != nil {
+		t.Fatal(err)
+	}
+	expect := func(failure messageFailure, key string) {
+		t.Helper()
+		if failure.Error.Key != key || failure.Error.Params["v0"] == "" || failure.Error.Params["v1"] == "" {
+			t.Fatalf("error = %+v, want %s", failure.Error, key)
+		}
+	}
+
+	// Plan edits that would put the fixed key on a shared plan.
+	var failure messageFailure
+	callOK(t, app, http.MethodPost, routeKeysBind, nil, map[string]string{"scope": fixed, "plan_id": "pool"}, http.StatusConflict, &failure)
+	expect(failure, "backend.cc_shared_plan_has_fixed_key")
+	failure = messageFailure{}
+	callOK(t, app, http.MethodPatch, routePlans, nil, map[string]any{"id": "pool", "scopes": []string{billing.CallerScope(spare), fixed}},
+		http.StatusConflict, &failure)
+	expect(failure, "backend.cc_shared_plan_has_fixed_key")
+	failure = messageFailure{}
+	callOK(t, app, http.MethodPatch, routePlans, nil, map[string]any{"id": "fixed-a", "shared_quota": true, "windows": fixedWeek},
+		http.StatusConflict, &failure)
+	expect(failure, "backend.cc_shared_plan_has_fixed_key")
+	failure = messageFailure{}
+	callOK(t, app, http.MethodPost, routePlans, nil, map[string]any{"name": "New pool", "shared_quota": true, "windows": week, "scopes": []string{fixed}},
+		http.StatusConflict, &failure)
+	expect(failure, "backend.cc_shared_plan_has_fixed_key")
+	if key, _ := app.store.KeyViewForScope(fixed); key.PlanID != "fixed-a" {
+		t.Fatalf("a refused edit rebound the fixed key to %q", key.PlanID)
+	}
+	if plan, _ := app.store.PlanByID("fixed-a"); plan.SharedQuota {
+		t.Fatal("a refused edit made the fixed key's plan shared")
+	}
+	// Edits that keep fixed keys off shared plans still work.
+	callOK(t, app, http.MethodPatch, routePlans, nil, map[string]any{"id": "pool", "name": "Pool 2"}, http.StatusOK, nil)
+	callOK(t, app, http.MethodPost, routeKeysBind, nil, map[string]string{"scope": billing.CallerScope(ccRemainderKey), "plan_id": "pool"}, http.StatusOK, nil)
+	callOK(t, app, http.MethodPatch, routePlans, nil, map[string]any{"id": "fixed-a", "name": "Fixed A2"}, http.StatusOK, nil)
+
+	// A fixed key that ends up on a shared plan anyway, here through the
+	// store, makes the CC settings unsavable and the CC page warn.
+	shared := true
+	if _, err := app.store.UpdatePlanWithBindings(billing.PlanPatch{ID: "fixed-a", SharedQuota: &shared, Windows: &fixedWeek}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var view struct {
+		CC ccbilling.View `json:"cc"`
+	}
+	callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, &view)
+	if len(view.CC.Warnings) != 1 || view.CC.Warnings[0].Key != "backend.cc_fixed_key_shared_plan_warning" {
+		t.Fatalf("CC warnings = %+v", view.CC.Warnings)
+	}
+	failure = messageFailure{}
+	callOK(t, app, http.MethodPut, routeCCConfig, nil, view.CC.Settings, http.StatusBadRequest, &failure)
+	expect(failure, "backend.cc_fixed_key_on_shared_plan")
+	callOK(t, app, http.MethodPost, routeCCRefresh, nil, nil, http.StatusOK, nil)
+	var page struct {
+		Entries []struct {
+			Message string `json:"message"`
+		} `json:"entries"`
+	}
+	callOK(t, app, http.MethodGet, routePluginLogs, url.Values{"level": {"all"}}, nil, http.StatusOK, &page)
+	logged := 0
+	for _, entry := range page.Entries {
+		if strings.Contains(entry.Message, "is bound to shared quota plan") {
+			logged++
+		}
+	}
+	if logged != 1 {
+		t.Fatalf("shared plan logged %d times, want once", logged)
+	}
+
+	// Switching the plan back clears the warning and the settings save again.
+	shared = false
+	if _, err := app.store.UpdatePlanWithBindings(billing.PlanPatch{ID: "fixed-a", SharedQuota: &shared}, nil); err != nil {
+		t.Fatal(err)
+	}
+	callOK(t, app, http.MethodPut, routeCCConfig, nil, view.CC.Settings, http.StatusOK, nil)
+	callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, &view)
+	if len(view.CC.Warnings) != 0 {
+		t.Fatalf("CC warnings after unsharing = %+v", view.CC.Warnings)
+	}
+}
