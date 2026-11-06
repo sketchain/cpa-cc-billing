@@ -892,3 +892,129 @@ func TestCCFixedKeysRejectSharedQuotaPlans(t *testing.T) {
 		t.Fatalf("CC warnings after unsharing = %+v", view.CC.Warnings)
 	}
 }
+
+func openStateFile(t *testing.T, path string, clock *ccTestClock) *App {
+	t.Helper()
+	app := newTestApp(t)
+	t.Cleanup(app.Shutdown)
+	if clock != nil {
+		app.store.SetClock(clock.Now)
+	}
+	if _, err := app.HandleMethod(MethodPluginRegister, mustMarshal(t, LifecycleRequest{
+		ConfigYAML: []byte("enabled: true\nstate_file: \"" + path + "\"\n"),
+	})); err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
+func ccMetaValue(t *testing.T, path, key string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var value string
+	if err := db.QueryRow(`SELECT value FROM cc_meta WHERE key = ?`, key).Scan(&value); err != nil {
+		t.Fatalf("cc_meta %s: %v", key, err)
+	}
+	return value
+}
+
+// The billing schema upgrade to version 25 (shared quota plans) and the CC
+// tables, versioned separately in cc_meta, leave each other alone: a
+// database of upstream schema 25 with a shared pool opens with its pool, a
+// database of this fork's previous release (schema 24 with CC tables)
+// upgrades with its CC settings intact, and a new file gets both.
+func TestCCDatabasesAcrossTheSharedQuotaSchema(t *testing.T) {
+	clock := &ccTestClock{now: time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)}
+	anchor := clock.now.Add(2 * 24 * time.Hour)
+	member := billing.CallerScope(ccRemainderKey)
+
+	t.Run("upstream schema 25 with a shared pool", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "cpa-key-billing-state-v1.db")
+		legacy := openStateFile(t, path, clock)
+		if _, err := legacy.store.SyncKeys([]string{ccRemainderKey}, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := legacy.store.CreatePlanWithBindings(billing.Plan{ID: "pool", Name: "Pool", SharedQuota: true, Windows: []billing.QuotaWindow{
+			{Name: "Week", PeriodSeconds: weekSeconds, Amount: 50, CycleAnchorAt: anchor},
+		}}, []string{member}); err != nil {
+			t.Fatal(err)
+		}
+		if decision := legacy.store.Authorize(member, clock.now); !decision.Allowed {
+			t.Fatalf("admission = %+v", decision)
+		}
+		legacy.Shutdown()
+		if version := sqliteUserVersion(t, path); version != 25 {
+			t.Fatalf("billing schema = %d, want 25", version)
+		}
+
+		app := openStateFile(t, path, clock)
+		callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, nil)
+		plan, found := app.store.PlanByID("pool")
+		if !found || !plan.SharedQuota || len(plan.Cycles) != 1 {
+			t.Fatalf("shared pool after reopening = %+v", plan)
+		}
+		app.Shutdown()
+		if version := sqliteUserVersion(t, path); version != 25 {
+			t.Fatalf("billing schema after the CC tables = %d", version)
+		}
+		if ccMetaValue(t, path, "schema_version") == "" {
+			t.Fatal("CC tables missing")
+		}
+	})
+
+	t.Run("previous release at schema 24 with CC tables", func(t *testing.T) {
+		app, _ := newCCTestApp(t)
+		path := app.store.Config().StateFile
+		settingsBefore := ccMetaValue(t, path, "settings")
+		app.Shutdown()
+		db, err := sql.Open("sqlite3", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`ALTER TABLE plans DROP COLUMN shared_quota; ALTER TABLE plans DROP COLUMN cycles_json; PRAGMA user_version = 24;`); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+		ccVersion := ccMetaValue(t, path, "schema_version")
+
+		upgraded := openStateFile(t, path, nil)
+		var view struct {
+			CC ccbilling.View `json:"cc"`
+		}
+		callOK(t, upgraded, http.MethodGet, routeCC, nil, nil, http.StatusOK, &view)
+		if key := view.CC.Settings.Keys[billing.CallerScope(ccFixedKey)]; key.Kind != ccbilling.KeyFixed || key.PoolID != "main" {
+			t.Fatalf("CC settings after the upgrade = %+v", view.CC.Settings)
+		}
+		plan, found := upgraded.store.PlanByID("fixed-a")
+		if !found || plan.SharedQuota || plan.Windows[0].Amount != 100 {
+			t.Fatalf("plan after the upgrade = %+v", plan)
+		}
+		upgraded.Shutdown()
+		if version := sqliteUserVersion(t, path); version != 25 {
+			t.Fatalf("billing schema after the upgrade = %d, want 25", version)
+		}
+		if after := ccMetaValue(t, path, "schema_version"); after != ccVersion {
+			t.Fatalf("CC schema changed from %s to %s", ccVersion, after)
+		}
+		if after := ccMetaValue(t, path, "settings"); after != settingsBefore {
+			t.Fatalf("CC settings changed:\n%s\n%s", settingsBefore, after)
+		}
+	})
+
+	t.Run("new database", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "cpa-cc-billing-state-v1.db")
+		app := openStateFile(t, path, clock)
+		callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, nil)
+		app.Shutdown()
+		if version := sqliteUserVersion(t, path); version != 25 {
+			t.Fatalf("billing schema = %d, want 25", version)
+		}
+		if ccMetaValue(t, path, "schema_version") == "" {
+			t.Fatal("CC tables missing")
+		}
+	})
+}
