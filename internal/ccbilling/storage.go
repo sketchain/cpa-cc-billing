@@ -15,6 +15,9 @@ import (
 // from cpa-key-billing opens unchanged and gains these tables on first use.
 const ccSchemaVersion = 4
 
+// SchemaVersion is the CC table format EnsureSchema migrates to.
+const SchemaVersion = ccSchemaVersion
+
 var ccMigrations = []string{
 	// Version 1.
 	`CREATE TABLE IF NOT EXISTS cc_segments (

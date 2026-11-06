@@ -8,6 +8,11 @@ import (
 )
 
 func (d *DB) Load(requestEventCutoff, pluginLogCutoff time.Time) (billing.Snapshot, error) {
+	snapshot, err := d.load(requestEventCutoff, pluginLogCutoff)
+	return snapshot, explainDamage(d.path, err)
+}
+
+func (d *DB) load(requestEventCutoff, pluginLogCutoff time.Time) (billing.Snapshot, error) {
 	if err := pruneRequestEvents(d.db.Exec, requestEventCutoff); err != nil {
 		return billing.Snapshot{}, err
 	}

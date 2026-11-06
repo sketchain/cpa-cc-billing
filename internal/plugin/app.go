@@ -57,7 +57,7 @@ func newApp(store *billing.Store) *App {
 }
 
 func openRepository(path string) (billing.Repository, error) {
-	return sqlite.Open(path, quotaHeaderReport)
+	return sqlite.Open(path, quotaHeaderReport, sqlite.WithCCSchema(ccbilling.SchemaVersion, ccbilling.EnsureSchema))
 }
 
 // HandleMethod keeps panics from crossing the plugin's C ABI boundary.
