@@ -221,7 +221,7 @@ new-api 配置（渠道类型选「高级自定义」）：
 
 ## 环境要求
 
-- CLIProxyAPI `7.3.7` 或更高版本，建议使用最新版本；[按路由规则过滤模型列表](#模型列表)需要 `8.0.37` 或更高版本
+- CLIProxyAPI `7.3.7` 或更高版本，支持 v8，建议使用最新版本；[按路由规则过滤模型列表](#模型列表)需要 `8.0.37` 或更高版本
 - 使用支持插件的 CLIProxyAPI 构建，不要使用 no-plugin 版本
 
 ## 安装
@@ -277,12 +277,48 @@ CPA 按插件优先级选择调度插件，不会依次调用。建议显式设�
 首次调度或会话绑定失效时，插件按配置的策略，从优先级最高的可用凭证中选择。启用会话粘性后，同一会话优先复用已绑定的凭证；凭证不可用或会话空闲时间超过 `session-affinity-ttl` 后，重新选择凭证。会话标识由 CPA 提供，没有会话标识的请求按常规策略调度。
 
 > [!WARNING]
-> 升级前请备份数据文件。
+> 升级前请停止服务并备份数据文件，见[升级与数据库恢复](#升级与数据库恢复)。
 >
 > - 可以直接使用 cpa-key-billing v1.0.0 及以后版本的数据库文件，见[从 cpa-key-billing 迁移](#从-cpa-key-billing-迁移)。
 > - cpa-key-billing v0.8.4 及更早版本的 JSON 或 SQLite 数据文件不支持迁移，请将 `state_file` 指向新文件。
 
 重启 CLIProxyAPI 后，在管理中心打开「CPA CC Billing」。确认模型定价后，创建订阅计划并绑定需要限制的 API Key。
+
+## 升级与数据库恢复
+
+### 升级前
+
+1. 停止 CLIProxyAPI（Docker Compose 部署停止 `cli-proxy-api` 服务）。
+2. 备份 `state_file` 指向的数据库（默认 `plugins/cpa-cc-billing-state-v1.db`），连同同名的 `-wal`、`-shm` 文件（存在时）。这三个文件要在停止服务后一起复制，只复制 `.db` 可能丢失还没写回主文件的最新数据。
+3. 替换插件，启动 CLIProxyAPI。
+
+回退到旧版插件前，要先恢复升级前的备份：新版迁移过的数据库，旧版无法打开。
+
+### 迁移前自动备份
+
+插件打开数据库时，如果需要升级表结构（计费表的 `PRAGMA user_version`，或 CC 表 `cc_meta` 的 `schema_version`），会先用 SQLite 的 `VACUUM INTO` 把整个数据库（包括 WAL 中的内容）备份到同一目录，确认备份能打开、完整后再迁移：
+
+```text
+plugins/cpa-cc-billing-state-v1.db.bak-u24-to-u25-cc4-20261107T120000
+```
+
+文件名依次是计费表的旧、新版本，CC 表的旧、新版本（没有变化时只写一个），以及备份时间（UTC）。备份文件权限为 `600`，只保留最近 3 份，更早的自动删除；不需要迁移时不备份。备份成功后，插件日志会记录备份路径。
+
+备份失败时（例如目录不可写、磁盘空间不足）不会迁移：插件注册失败，CLIProxyAPI 日志写明原因和数据库路径，处理后重启即可。迁移本身失败时，日志会给出这次的备份路径。
+
+### 数据库损坏时
+
+插件注册失败、日志出现 `malformed database schema`、`database disk image is malformed` 或 `file is not a database` 时，数据库文件已经损坏。日志会同时列出同目录下可用的迁移备份。
+
+1. 停止 CLIProxyAPI，把损坏的 `.db`、`-wal`、`-shm` 文件另存一份。
+2. 有合适的备份时直接恢复：把迁移备份（或自己的备份）复制为 `state_file`，删除原来的 `-wal`、`-shm`，启动后插件会重新迁移。备份之后记录的数据会丢失。
+3. 没有合适的备份时，用 sqlite3 抢救损坏的文件，再用恢复出的文件替换原文件（同样删除原来的 `-wal`、`-shm`）：
+
+   ```sh
+   sqlite3 plugins/cpa-cc-billing-state-v1.db ".recover" | sqlite3 plugins/cpa-cc-billing-state-v1.db.recovered
+   ```
+
+4. 启动后打开「CC 分账」页，点「从历史重建」，补回 `cc_segments` 等由请求历史推导出的数据。
 
 ## 页面访问
 
