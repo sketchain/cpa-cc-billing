@@ -10,6 +10,9 @@ type QuotaReport struct {
 	CreditBalance    string
 	CreditsUnlimited *bool
 	Windows          []QuotaReportWindow
+	// LimitReached is the response saying its main limit is used up. It
+	// is not stored: only the live state of the subscription split reads it.
+	LimitReached bool
 }
 
 // QuotaReportWindow is a quota window as one response reported it. Its limit

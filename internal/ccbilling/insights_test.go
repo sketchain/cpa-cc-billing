@@ -87,7 +87,7 @@ func TestReadingVelocityUnderLinearUse(t *testing.T) {
 }
 
 func TestBasisConversionAppliesMultipliersOnceOnTheWeightedBasis(t *testing.T) {
-	estimates := Estimates{Basis: BasisWeighted, Weights: []EffectiveWeight{
+	estimates := ProviderWeights{Basis: BasisWeighted, Weights: []EffectiveWeight{
 		{ID: "a", Models: []string{"model-a"}, Multiplier: 2},
 		{ID: "b", Models: []string{"model-b"}, Multiplier: 1.5},
 		{ID: "c", Models: []string{"model-c"}, Multiplier: 1},

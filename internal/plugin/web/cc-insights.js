@@ -27,6 +27,9 @@ function readCCUsage(reload) {
   return ccUsageQuery.read("usage", () => plugin("GET", "/cc/key-usage").then((response) => response.usage), reload);
 }
 
+// The pools of the provider on display.
+function ccShownPools(data) { return data.cc.settings.pools.filter((pool) => ccPoolProvider(pool) === ccState.provider); }
+
 function ccRate(value, digits = 2) { return Number.isFinite(value) ? ccNumber(value, digits) : "—"; }
 
 function ccHoursText(seconds) { return ccNumber(seconds / 3600, 2); }
@@ -210,23 +213,25 @@ function renderCCForecast() {
   );
   const hint = el("p", { class: "muted small", text: m("cc.forecast_hint") });
   const status = (text) => target.replaceChildren(head, hint, el("div", { class: "empty", text }));
-  if (!data.cc.settings.pools.length) return status(m("cc.forecast_no_pools"));
+  if (!ccShownPools(data).length) return status(m("cc.forecast_no_pools"));
   if (!data.cc.loaded) return status(m("cc.not_loaded"));
   const forecast = ccForecastQuery.key === ccForecastKey() ? ccForecastQuery.value : null;
   if (!forecast) return status(ccForecastQuery.error ? m("cc.forecast_load_failed", { v0: ccForecastQuery.error }) : m("ui.loading"));
   const span5h = m("cc.forecast_span_minutes", { v0: ccNumber(forecast.window_5h_seconds / 60, 0) });
   const span7d = m("cc.forecast_span_hours", { v0: ccNumber(forecast.window_7d_seconds / 3600, 0) });
   const rows = [];
-  for (const pool of forecast.pools.filter((item) => item.accounts.length)) {
+  for (const pool of forecast.pools.filter((item) => item.accounts.length && (item.provider || "claude") === ccState.provider)) {
+    // Each pool's spend is on its provider's basis and safety factor.
+    const context = { ...forecast, conversion: pool.conversion, safety_factor: pool.safety_factor };
     rows.push(
       el(
         "tr",
         { class: "cc-forecast-pool" },
         el("td", {}, el("strong", { text: pool.name || pool.id }), el("div", { class: "muted small", text: m("cc.forecast_pool_row") })),
-        ccPoolExhaustCell(forecast, pool.five_hour, m("cc.forecast_label_5h"), span5h),
-        ccPoolExhaustCell(forecast, pool.week, m("cc.forecast_label_7d"), span7d),
-        ccPoolBlockCell(forecast, pool.week, m("cc.forecast_label_7d"), span7d),
-        ccPoolBlockCell(forecast, pool.five_hour, m("cc.forecast_label_5h"), span5h)
+        ccPoolExhaustCell(context, pool.five_hour, m("cc.forecast_label_5h"), span5h),
+        ccPoolExhaustCell(context, pool.week, m("cc.forecast_label_7d"), span7d),
+        ccPoolBlockCell(context, pool.week, m("cc.forecast_label_7d"), span7d),
+        ccPoolBlockCell(context, pool.five_hour, m("cc.forecast_label_5h"), span5h)
       )
     );
     for (const account of pool.accounts)
@@ -235,8 +240,8 @@ function renderCCForecast() {
           "tr",
           {},
           el("td", { class: "cc-forecast-account" }, el("div", { text: ccCredentialName(data, account.auth_index) })),
-          ccAccountWindowCell(forecast, account.five_hour, m("cc.forecast_label_5h"), span5h),
-          ccAccountWindowCell(forecast, account.week, m("cc.forecast_label_7d"), span7d),
+          ccAccountWindowCell(context, account.five_hour, m("cc.forecast_label_5h"), span5h),
+          ccAccountWindowCell(context, account.week, m("cc.forecast_label_7d"), span7d),
           el("td", { class: "muted", text: "—" }),
           el("td", { class: "muted", text: "—" })
         )
@@ -573,12 +578,16 @@ function renderCCUsage() {
   const head = el("div", { class: "cc-trend-toolbar" }, el("h3", { text: m("cc.usage_title") }), ccUsageRangeControl());
   const hint = el("p", { class: "muted small", text: m("cc.usage_hint") });
   const status = (text) => target.replaceChildren(head, hint, el("div", { class: "empty", text }));
-  if (!data.cc.settings.pools.length) return status(m("cc.forecast_no_pools"));
+  if (!ccShownPools(data).length) return status(m("cc.forecast_no_pools"));
   if (!data.cc.loaded) return status(m("cc.not_loaded"));
   const usage = ccUsageQuery.value;
   if (!usage) return status(ccUsageQuery.error ? m("cc.usage_load_failed", { v0: ccUsageQuery.error }) : m("ui.loading"));
   const colors = analysisColors();
   const draws = [];
-  target.replaceChildren(head, hint, ...usage.pools.map((pool) => ccUsagePoolCard(pool, colors, draws)));
+  target.replaceChildren(
+    head,
+    hint,
+    ...usage.pools.filter((pool) => (pool.provider || "claude") === ccState.provider).map((pool) => ccUsagePoolCard(pool, colors, draws))
+  );
   for (const draw of draws) draw();
 }

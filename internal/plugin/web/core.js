@@ -18,12 +18,16 @@ const VIEW_PREFERENCE_PREFIX = "cpa-super-billing.view.v1.";
 
 const embedded = window.parent !== window;
 document.body.classList.toggle("embedded", embedded);
-const ADMIN_TAB_IDS = ["keys", "analysis", "request-events", "errors", "auth-files", "ai-providers", "cc", "settings"];
+const ADMIN_TAB_IDS = ["keys", "analysis", "request-events", "errors", "auth-files", "ai-providers", "split", "settings"];
 const ACCOUNT_TAB_IDS = ["subscription", "analysis", "request-events", "errors", "auth-files", "ai-providers"];
 const PAGE_ROUTE_KEY = "cpa-super-billing.route.v1." + (embedded ? "embedded" : "standalone");
 
+// The subscription split was the "cc" tab.
+const LEGACY_ADMIN_TABS = { cc: "split" };
+
 function parsePageRoute(value) {
-  const [role, tab] = value.split("/");
+  const [role, stored] = value.split("/");
+  const tab = LEGACY_ADMIN_TABS[stored] || stored;
   if (role === "account") return { role, tab: ACCOUNT_TAB_IDS.includes(tab) ? tab : "subscription" };
   if (role === "admin") return { role, tab: ADMIN_TAB_IDS.includes(tab) ? tab : "keys" };
   return null;

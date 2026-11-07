@@ -9,7 +9,7 @@ const PANEL_TAB_LABELS = {
   errors: () => m("ui.error_events"),
   "auth-files": () => m("ui.auth_files"),
   "ai-providers": () => m("ui.ai_providers"),
-  cc: () => m("cc.tab")
+  split: () => m("cc.tab")
 };
 
 function readPanelSettings(reload = false) { return panelQuery.read("panel", () => plugin("GET", "/panel-settings"), reload); }

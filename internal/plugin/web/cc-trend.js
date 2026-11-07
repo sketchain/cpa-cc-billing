@@ -27,7 +27,9 @@ function ccShiftDay(key, days) {
 // - usdPerPoint: cost / gain of the day's segments, without the segments the
 //   estimate excluded (a raw trend has none marked);
 // - weekly: k × usdPerPoint × 100, using the rolling k (weeklyBasis
-//   "rolling") when the day's own k is missing, zero or imprecise.
+//   "rolling") when the day's own k is missing, zero or imprecise; none when
+//   the account needs a k it does not have. An account whose segments
+//   measure the 7-day window has weekly = usdPerPoint × 100 ("window").
 function ccTrendDays(trend, { now = Date.now(), offset = ccLocalOffset } = {}) {
   const sums = new Map();
   const day = (at) => {
@@ -72,8 +74,14 @@ function ccTrendDays(trend, { now = Date.now(), offset = ccLocalOffset } = {}) {
     const gain7d = window.reduce((total, item) => total + item.gain7d, 0);
     entry.rollingK = gain7d > 0 ? gain5h / gain7d : null;
     entry.rollingDays = window.length;
+    if (trend.segment_window === "7d") {
+      // Segments of the 7-day window: a point is 1% of the weekly total.
+      entry.weeklyBasis = entry.usdPerPoint === null ? null : "window";
+      entry.weekly = entry.weeklyBasis ? entry.usdPerPoint * 100 : null;
+      return;
+    }
     const trusted = entry.k !== null && entry.k > 0 && !entry.lowPrecision;
-    const k = trusted ? entry.k : entry.rollingK > 0 ? entry.rollingK : null;
+    const k = trend.needs_k ? null : trusted ? entry.k : entry.rollingK > 0 ? entry.rollingK : null;
     entry.weeklyBasis = k === null || entry.usdPerPoint === null ? null : trusted ? "daily" : "rolling";
     entry.weekly = entry.weeklyBasis ? k * entry.usdPerPoint * 100 : null;
   });
@@ -108,6 +116,7 @@ function ccTrendTooltipLines(day, trend) {
     m("cc.trend_tip_usd_per_point", { v0: day.usdPerPoint === null ? "—" : ccUSD(day.usdPerPoint) })
   ];
   if (day.weeklyBasis === "daily") lines.push(m("cc.trend_tip_weekly_daily", { v0: ccUSD(day.weekly) }));
+  else if (day.weeklyBasis === "window") lines.push(m("cc.trend_tip_weekly_window", { v0: ccUSD(day.weekly) }));
   else if (day.weeklyBasis === "rolling") lines.push(m("cc.trend_tip_weekly_rolling", { v0: ccUSD(day.weekly) }));
   else lines.push(m("cc.trend_tip_weekly_none"));
   return lines;
@@ -237,8 +246,13 @@ function ccTrendGainConfig(days, trend, colors, width) {
     barPercentage: 0.9
   });
   const datasets = [
-    bar(m("cc.trend_gain_5h"), days.map((day) => (day.hasData ? day.gain5h : null)), colors[0]),
-    bar(m("cc.trend_gain_7d"), days.map((day) => (day.hasData ? day.gain7d : null)), colors[2]),
+    trend.segment_window !== "7d" && bar(m("cc.trend_gain_5h"), days.map((day) => (day.hasData ? day.gain5h : null)), colors[0]),
+    // A 7-day window account's segments are its 7-day gain; it has no k evidence.
+    bar(
+      m("cc.trend_gain_7d"),
+      days.map((day) => (day.hasData ? (trend.segment_window === "7d" ? day.gain : day.gain7d) : null)),
+      colors[2]
+    ),
     {
       type: "line",
       label: m("cc.trend_weekly"),
@@ -254,7 +268,7 @@ function ccTrendGainConfig(days, trend, colors, width) {
       pointRadius: 3.5,
       pointHoverRadius: 5
     }
-  ];
+  ].filter(Boolean);
   return {
     type: "bar",
     data: { labels: days.map((day) => ccTrendDayLabel(day.key)), datasets },
@@ -306,6 +320,13 @@ function ccTrendRangeControl() {
 // The saved pools' accounts, in pool order.
 function ccTrendAccounts(data) { return [...new Set(data.cc.settings.pools.flatMap((pool) => pool.auth_indexes))]; }
 
+// The pooled accounts of the provider on display.
+function ccTrendShownAccounts(data) {
+  return [
+    ...new Set(data.cc.settings.pools.filter((pool) => ccPoolProvider(pool) === ccState.provider).flatMap((pool) => pool.auth_indexes))
+  ];
+}
+
 function readCCTrend(reload) {
   const data = ccQuery.value;
   if (!data) return Promise.resolve(null);
@@ -342,10 +363,39 @@ function ccTrendCard(data, index, entry, colors, draws) {
     return card;
   }
   const trend = entry.trend;
-  if (trend.k) head.append(ccTag(m("cc.trend_current_k", { v0: ccNumber(trend.k), v1: m("cc.k_origin_" + trend.k_source) }), "info"));
+  const weeklyWindow = trend.segment_window === "7d";
+  if (trend.k && !weeklyWindow)
+    head.append(ccTag(m("cc.trend_current_k", { v0: ccNumber(trend.k), v1: m("cc.k_origin_" + trend.k_source) }), "info"));
+  if (weeklyWindow) head.append(ccTag(m("cc.window_7d_only"), "info", m("cc.window_7d_only_tip")));
+  else if (trend.needs_k) head.append(ccTag(m("cc.needs_k"), "warn", m("cc.needs_k_tip")));
   const days = ccTrendRange(ccTrendDays(trend), ccTrendState.range);
   if (!ccTrendEnough(days)) {
     card.append(el("div", { class: "empty", text: m("cc.trend_empty") }));
+    return card;
+  }
+  if (weeklyWindow) {
+    // No 5-hour window: no k evidence, and the segments measure the 7-day window.
+    const gainPanel = ccTrendPanel(m("cc.trend_chart_gain"));
+    card.append(
+      el(
+        "div",
+        { class: "cc-trend-charts" },
+        el(
+          "div",
+          { class: "cc-trend-figure" },
+          el("div", { class: "cc-trend-figure-title", text: m("cc.trend_chart_gain") }),
+          el(
+            "div",
+            { class: "analysis-legend" },
+            analysisLegendItem(colors[2], m("cc.trend_gain_7d")),
+            analysisLegendItem(colors[4], m("cc.trend_weekly"))
+          ),
+          gainPanel
+        )
+      ),
+      el("p", { class: "muted small", text: m("cc.trend_window_7d_note") })
+    );
+    draws.push(() => ccDrawTrendChart(gainPanel, ccTrendGainConfig(days, trend, colors, gainPanel.clientWidth)));
     return card;
   }
   const kPanel = ccTrendPanel(m("cc.trend_chart_k"));
@@ -387,6 +437,7 @@ function ccTrendCard(data, index, entry, colors, draws) {
         gainPanel
       )
     ),
+    trend.needs_k ? el("p", { class: "muted small", text: m("cc.trend_needs_k_note") }) : "",
     el("p", { class: "muted small", text: m(trend.exclusion === "estimate" ? "cc.trend_basis_estimate" : "cc.trend_basis_raw") })
   );
   draws.push(() => ccDrawTrendChart(kPanel, ccTrendKConfig(days, trend, colors, kPanel.clientWidth)));
@@ -403,7 +454,7 @@ function renderCCTrend() {
     target.replaceChildren();
     return;
   }
-  const indexes = ccTrendAccounts(data);
+  const indexes = ccTrendShownAccounts(data);
   const head = el(
     "div",
     { class: "cc-trend-toolbar" },
@@ -415,7 +466,7 @@ function renderCCTrend() {
     target.replaceChildren(head, hint, el("div", { class: "empty", text: m("cc.trend_no_accounts") }));
     return;
   }
-  const values = ccTrendQuery.key === JSON.stringify(indexes) ? ccTrendQuery.value : null;
+  const values = ccTrendQuery.key === JSON.stringify(ccTrendAccounts(data)) ? ccTrendQuery.value : null;
   if (!values && ccTrendQuery.error) {
     target.replaceChildren(head, hint, el("div", { class: "empty", text: m("cc.trend_load_failed", { v0: ccTrendQuery.error }) }));
     return;

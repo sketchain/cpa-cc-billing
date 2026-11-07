@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -74,8 +75,6 @@ var ccMigrations = []string{
 const (
 	metaSchemaVersion = "schema_version"
 	metaSettings      = "settings"
-	claudeProvider    = "claude"
-	claudeLimitKey    = "unified"
 )
 
 func nanos(at time.Time) int64 {
@@ -142,28 +141,16 @@ func loadSettings(db *sql.DB) (Settings, error) {
 	var raw string
 	switch err := db.QueryRow(`SELECT value FROM cc_meta WHERE key = ?`, metaSettings).Scan(&raw); {
 	case errors.Is(err, sql.ErrNoRows):
-		return DefaultSettings(), nil
+		return DefaultSettings().Normalized()
 	case err != nil:
 		return Settings{}, fmt.Errorf("Read CC settings: %w", err)
 	}
-	settings := DefaultSettings()
+	// Parameters added by later versions keep their defaults; missing
+	// providers, and the tier tables of settings saved before providers
+	// existed, are filled in by Normalized.
+	settings := Settings{Params: DefaultGlobalParams()}
 	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
 		return Settings{}, fmt.Errorf("Read CC settings: %w", err)
-	}
-	// Parameters added by later versions keep their defaults.
-	defaults := DefaultParams()
-	for tier, value := range defaults.TierWeeklyUSD {
-		if _, ok := settings.Params.TierWeeklyUSD[tier]; !ok {
-			settings.Params.TierWeeklyUSD[tier] = value
-		}
-	}
-	if settings.Params.TierK == nil {
-		settings.Params.TierK = map[string]float64{}
-	}
-	for tier, value := range defaults.TierK {
-		if _, ok := settings.Params.TierK[tier]; !ok {
-			settings.Params.TierK[tier] = value
-		}
 	}
 	return settings.Normalized()
 }
@@ -254,6 +241,13 @@ func commitAdvance(db *sql.DB, authIndex string, state StreamState, segments []S
 		return err
 	}
 	return transact(db, func(tx *sql.Tx) error {
+		if state.restarted {
+			// The stored segments measure another window.
+			if _, err := tx.Exec(`DELETE FROM cc_segment_costs WHERE segment_id IN (SELECT id FROM cc_segments WHERE auth_index = ?);
+				DELETE FROM cc_segments WHERE auth_index = ?`, authIndex, authIndex); err != nil {
+				return fmt.Errorf("Reset CC segments: %w", err)
+			}
+		}
 		for _, segment := range segments {
 			result, err := tx.Exec(`INSERT INTO cc_segments (auth_index, block_at, at, cost_usd, gain) VALUES (?, ?, ?, ?, ?)`,
 				authIndex, nanos(segment.Block), nanos(segment.At), segment.CostUSD, segment.Gain)
@@ -335,15 +329,17 @@ func resetStreams(db *sql.DB) error {
 	})
 }
 
-// readObservations returns an account's unified window reports made after from
-// and no later than to, one per request, oldest first.
-func readObservations(db *sql.DB, authIndex string, from, to time.Time) ([]Observation, error) {
-	rows, err := db.Query(`SELECT request_event_id, at, seconds, used_percent, reset_at FROM quota_report_windows
-		WHERE auth_index = ? AND provider = ? AND limit_key = ? AND seconds IN (?, ?) AND at > ? AND at <= ?
-		ORDER BY at, request_event_id`,
-		authIndex, claudeProvider, claudeLimitKey, int64(FiveHours/time.Second), int64(Week/time.Second), nanos(from), nanos(to))
+// readObservations returns an account's main window reports made after from
+// and no later than to, one per request, oldest first, with the credit
+// balance each report named.
+func readObservations(db *sql.DB, source QuotaSource, authIndex string, from, to time.Time) ([]Observation, error) {
+	rows, err := db.Query(`SELECT w.request_event_id, w.at, w.seconds, w.used_percent, w.reset_at, COALESCE(r.credit_balance, '')
+		FROM quota_report_windows w LEFT JOIN quota_reports r ON r.request_event_id = w.request_event_id
+		WHERE w.auth_index = ? AND w.provider = ? AND w.limit_key = ? AND w.seconds IN (?, ?) AND w.at > ? AND w.at <= ?
+		ORDER BY w.at, w.request_event_id`,
+		authIndex, source.Provider, source.LimitKey, int64(FiveHours/time.Second), int64(Week/time.Second), nanos(from), nanos(to))
 	if err != nil {
-		return nil, fmt.Errorf("Read Claude quota reports: %w", err)
+		return nil, fmt.Errorf("Read quota reports: %w", err)
 	}
 	defer rows.Close()
 	var observations []Observation
@@ -351,12 +347,16 @@ func readObservations(db *sql.DB, authIndex string, from, to time.Time) ([]Obser
 	for rows.Next() {
 		var id, at, seconds, resetAt int64
 		var used float64
-		if err := rows.Scan(&id, &at, &seconds, &used, &resetAt); err != nil {
-			return nil, fmt.Errorf("Read Claude quota reports: %w", err)
+		var credits string
+		if err := rows.Scan(&id, &at, &seconds, &used, &resetAt, &credits); err != nil {
+			return nil, fmt.Errorf("Read quota reports: %w", err)
 		}
 		if id != lastID || len(observations) == 0 {
 			observations = append(observations, Observation{At: timeAt(at)})
 			lastID = id
+			if balance, err := strconv.ParseFloat(strings.TrimSpace(credits), 64); err == nil && finite(balance) {
+				observations[len(observations)-1].HasCredits, observations[len(observations)-1].Credits = true, balance
+			}
 		}
 		obs := &observations[len(observations)-1]
 		if seconds == int64(FiveHours/time.Second) {
@@ -372,12 +372,24 @@ func readObservations(db *sql.DB, authIndex string, from, to time.Time) ([]Obser
 const maxRequestDuration = 2 * time.Hour
 
 // readCosts returns the costs of an account's requests completed after from
-// and no later than to, in USD.
-func readCosts(db *sql.DB, authIndex string, from, to time.Time, toUSD func(float64, string) float64) ([]CostEvent, error) {
+// and no later than to, in USD. Requests the provider's segment rules leave
+// out are marked with the reason; each request is judged by its own record
+// and quota report only.
+func readCosts(db *sql.DB, source QuotaSource, rules SegmentRules, authIndex string, from, to time.Time,
+	toUSD func(float64, string) float64) ([]CostEvent, error) {
+	// Only providers whose rules ask for it look up each request's report.
+	mainWindow := "1"
+	args := []any{}
+	if rules.MainWindowOnly {
+		mainWindow = `EXISTS (SELECT 1 FROM quota_report_windows w WHERE w.request_event_id = request_events.id
+			AND w.limit_key = ? AND w.seconds IN (?, ?))`
+		args = append(args, source.LimitKey, int64(FiveHours/time.Second), int64(Week/time.Second))
+	}
+	args = append(args, authIndex, nanos(from.Add(-maxRequestDuration)), nanos(to))
 	rows, err := db.Query(`SELECT at, latency_ms, total_cost, currency,
-		CASE WHEN billing_model <> '' THEN billing_model ELSE upstream_model END FROM request_events
-		WHERE auth_index = ? AND at > ? AND at <= ? ORDER BY at, id`,
-		authIndex, nanos(from.Add(-maxRequestDuration)), nanos(to))
+		CASE WHEN billing_model <> '' THEN billing_model ELSE upstream_model END, price_source, `+mainWindow+`
+		FROM request_events
+		WHERE auth_index = ? AND at > ? AND at <= ? ORDER BY at, id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("Read request costs: %w", err)
 	}
@@ -386,17 +398,29 @@ func readCosts(db *sql.DB, authIndex string, from, to time.Time, toUSD func(floa
 	for rows.Next() {
 		var at, latency int64
 		var cost float64
-		var currency, model string
-		if err := rows.Scan(&at, &latency, &cost, &currency, &model); err != nil {
+		var currency, model, priceSource string
+		var mainWindow bool
+		if err := rows.Scan(&at, &latency, &cost, &currency, &model, &priceSource, &mainWindow); err != nil {
 			return nil, fmt.Errorf("Read request costs: %w", err)
 		}
 		completed := timeAt(at).Add(time.Duration(max(latency, 0)) * time.Millisecond)
-		if completed.After(from) && !completed.After(to) {
-			costs = append(costs, CostEvent{At: completed, USD: toUSD(cost, currency), Model: NormalizeModel(model)})
+		if !completed.After(from) || completed.After(to) {
+			continue
 		}
+		event := CostEvent{At: completed, USD: toUSD(cost, currency), Model: NormalizeModel(model)}
+		switch {
+		case rules.MainWindowOnly && !mainWindow:
+			event.Excluded = ExcludedOtherLimit
+		case rules.ExcludeUnpriced && priceSource == unpricedSource && cost == 0:
+			event.Excluded = ExcludedUnpriced
+		}
+		costs = append(costs, event)
 	}
 	return costs, rows.Err()
 }
+
+// unpricedSource is the price source of a request whose model had no price.
+const unpricedSource = "none"
 
 // NormalizeModel is the form model names are compared in.
 func NormalizeModel(model string) string { return strings.ToLower(strings.TrimSpace(model)) }

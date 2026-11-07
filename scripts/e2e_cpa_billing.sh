@@ -764,7 +764,7 @@ assert_model_catalog_filter() {
         filter='[.models[].slug]'
         ;;
     esac
-    full="$(catalog_ids "$port" "$path" "$filter" "${auth[@]}" -H "X-CPA-CC-Billing-Models: all")"
+    full="$(catalog_ids "$port" "$path" "$filter" "${auth[@]}" -H "X-CPA-Super-Billing-Models: all")"
     filtered="$(catalog_ids "$port" "$path" "$filter" "${auth[@]}")"
     expected="$full"
     if [[ "$filtering" == "true" ]]; then
@@ -1366,11 +1366,13 @@ assert_reference_price_billing() {
   log_step "参考价已验证：普通模型及带前缀、思考后缀的模型，流式和非流式均按参考价记账"
 }
 
-# cc_report writes one synthetic unified-limit report for a Claude account into
-# the plugin's database, as a response's rate-limit headers would. Claude OAuth
-# requests always go to api.anthropic.com, so the dummy upstream cannot produce
-# them; everything after the report — estimates, admission, balance and cycle
-# alignment — runs through the real host and plugin.
+# cc_report writes one synthetic main-limit report for a subscription account
+# into the plugin's database, as a response's rate-limit headers would: Claude's
+# unified limit by default, or ChatGPT's Codex limit with provider "codex" and
+# limit "codex". OAuth requests of both always go to the providers' own hosts,
+# so the dummy upstream cannot produce them; everything after the report —
+# estimates, admission, balance and cycle alignment — runs through the real
+# host and plugin.
 cc_report() {
   local database="$1"
   local auth_index="$2"
@@ -1379,23 +1381,25 @@ cc_report() {
   local used_7d="$5"
   local reset_5h="$6"
   local reset_7d="$7"
-  python3 -I - "$database" "$auth_index" "$request_id" "$used_5h" "$used_7d" "$reset_5h" "$reset_7d" <<'PY'
+  local provider="${8:-claude}"
+  local limit="${9:-unified}"
+  python3 -I - "$database" "$auth_index" "$request_id" "$used_5h" "$used_7d" "$reset_5h" "$reset_7d" "$provider" "$limit" <<'PY'
 import sqlite3
 import sys
 import time
 
-database, auth_index, request_id, used_5h, used_7d, reset_5h, reset_7d = sys.argv[1:]
+database, auth_index, request_id, used_5h, used_7d, reset_5h, reset_7d, provider, limit = sys.argv[1:]
 at = time.time_ns()
 connection = sqlite3.connect(database, timeout=30)
 with connection:
     connection.execute(
-        "INSERT INTO quota_reports (request_event_id, auth_index, provider, at) VALUES (?, ?, 'claude', ?)",
-        (int(request_id), auth_index, at))
+        "INSERT INTO quota_reports (request_event_id, auth_index, provider, at) VALUES (?, ?, ?, ?)",
+        (int(request_id), auth_index, provider, at))
     for seconds, used, reset in ((18000, used_5h, reset_5h), (604800, used_7d, reset_7d)):
         connection.execute(
             "INSERT INTO quota_report_windows (request_event_id, limit_key, seconds, auth_index, provider, at, used_percent, reset_at)"
-            " VALUES (?, 'unified', ?, ?, 'claude', ?, ?, ?)",
-            (int(request_id), seconds, auth_index, at, float(used), int(reset) * 1_000_000_000))
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (int(request_id), limit, seconds, auth_index, provider, at, float(used), int(reset) * 1_000_000_000))
 connection.close()
 PY
 }
@@ -1415,6 +1419,97 @@ cc_request() {
     --output "$output" \
     --write-out '%{http_code}' \
     "http://127.0.0.1:$port/v1/chat/completions"
+}
+
+# assert_codex_split runs the same keys through a ChatGPT (Codex) pool: a Team
+# account with the tier's $60 weekly default and no k, so its 5-hour
+# reservation is off and only the weekly reservation holds remainder keys.
+assert_codex_split() {
+  local port="$1" runtime_dir="$2" fixed_key="$3" fixed_scope="$4" remainder_key="$5" remainder_scope="$6"
+  local database="$runtime_dir/state.db"
+  local base="/v0/management/plugins/cpa-super-billing"
+  local auth_index="e2e-codex-team"
+  local plan status reset_5h reset_7d anchor fixed_used fixed_balance remainder_balance
+  management_call POST "$port" "$base/plans" -H "Content-Type: application/json" \
+    --data "$(jq -nc --arg scope "$fixed_scope" \
+      '{name: "e2e-ChatGPT-固定 key 周额度", currency: "USD", windows: [{name: "Week", period_seconds: 604800, amount: 20}], scopes: [$scope]}')" \
+    >"$runtime_dir/codex-plan.json"
+  plan="$(jq -er '.plan.id' "$runtime_dir/codex-plan.json")"
+  # 10% / 10%: R_week = 0.9 × 60 × 0.9 = $48.60 exceeds the fixed key's $20.
+  reset_5h=$(( $(date +%s) + 2 * 3600 ))
+  reset_7d=$(( $(date +%s) + 5 * 86400 ))
+  cc_report "$database" "$auth_index" 900000011 10 10 "$reset_5h" "$reset_7d" codex codex
+  management_call PUT "$port" "$base/cc/settings" -H "Content-Type: application/json" \
+    --data "$(jq -nc --arg auth "$auth_index" --arg fixed "$fixed_scope" --arg remainder "$remainder_scope" \
+      --slurpfile current <(management_call GET "$port" "$base/cc") '
+      $current[0].cc.settings + {
+        pools: [{id: "e2e-gpt", name: "e2e GPT 池", provider: "codex", auth_indexes: [$auth], anchor_auth_index: $auth}],
+        accounts: {($auth): {provider: "codex", tier: "team"}},
+        keys: {($fixed): {kind: "fixed", pool_id: "e2e-gpt"}, ($remainder): {kind: "remainder", pool_id: "e2e-gpt"}}
+      }')" >"$runtime_dir/codex-settings.json"
+
+  status="$(cc_request "$port" "$fixed_key" "$runtime_dir/responses/codex-fixed.json" "$runtime_dir/codex-fixed-headers.txt")"
+  if [[ "$status" != 200 ]]; then
+    echo "ChatGPT 池固定 key 请求返回 HTTP ${status}：$(cat "$runtime_dir/responses/codex-fixed.json")" >&2
+    return 1
+  fi
+  management_call GET "$port" "$base/plans" >"$runtime_dir/codex-plans.json"
+  anchor="$(jq -er --arg id "$plan" 'first(.plans[] | select(.id == $id)) | .windows[0].cycle_anchor_at' "$runtime_dir/codex-plans.json")"
+  if [[ "$(jq -nr --arg at "$anchor" '$at | sub("\\.[0-9]+"; "") | fromdateiso8601')" != "$reset_7d" ]]; then
+    echo "ChatGPT 池固定 key 的周期没有对齐账号的 7d 重置：锚点 ${anchor}" >&2
+    return 1
+  fi
+  status="$(cc_request "$port" "$remainder_key" "$runtime_dir/responses/codex-remainder.json" "$runtime_dir/codex-remainder-headers.txt")"
+  if [[ "$status" != 200 ]]; then
+    echo "ChatGPT 池余量 key 在额度充足时返回 HTTP ${status}：$(cat "$runtime_dir/responses/codex-remainder.json")" >&2
+    return 1
+  fi
+  management_call POST "$port" "$base/cc/refresh" >/dev/null
+  management_call GET "$port" "$base/keys" >"$runtime_dir/codex-keys-used.json"
+  fixed_used="$(jq -er --arg scope "$fixed_scope" 'first(.keys[] | select(.scope == $scope)) | .windows[0].dimensions[0].used' "$runtime_dir/codex-keys-used.json")"
+  fixed_balance="$(cc_balance "$port" "$fixed_key")"
+  remainder_balance="$(cc_balance "$port" "$remainder_key")"
+  if ! jq -en --argjson used "$fixed_used" --argjson fixed "$fixed_balance" --argjson remainder "$remainder_balance" '
+      $used > 0 and (($fixed - (20 - $used)) | fabs) < 0.000001 and
+      (($remainder - (48.6 - (20 - $used))) | fabs) < 0.000001' >/dev/null; then
+    echo "ChatGPT 池余额不正确：固定 key ${fixed_balance}（已用 ${fixed_used}），余量 key ${remainder_balance}" >&2
+    return 1
+  fi
+  management_call GET "$port" "$base/cc" >"$runtime_dir/codex-view.json"
+  if ! jq -e --arg auth "$auth_index" '
+      (.cc.accounts[] | select(.auth_index == $auth) | .provider == "codex" and .needs_k and .weekly_total_usd == 60) and
+      (.cc.pools[] | select(.id == "e2e-gpt") | .provider == "codex" and (.five_hour_enabled | not))' "$runtime_dir/codex-view.json" >/dev/null; then
+    echo "ChatGPT 池状态不正确：$(jq -c '{accounts: .cc.accounts, pools: .cc.pools}' "$runtime_dir/codex-view.json")" >&2
+    return 1
+  fi
+  log_step "ChatGPT 池：周期对齐 7d 重置；/balance 固定 key \$${fixed_balance}、余量 key \$${remainder_balance}；没有 k 时 5h 预留关闭"
+
+  # 95% of the 5-hour window does not hold remainder keys without k; 70% of
+  # the week (R_week = 0.9 × 60 × 0.3 = $16.20) does.
+  cc_report "$database" "$auth_index" 900000012 95 10 "$reset_5h" "$reset_7d" codex codex
+  management_call POST "$port" "$base/cc/refresh" >/dev/null
+  status="$(cc_request "$port" "$remainder_key" "$runtime_dir/responses/codex-five-hour.json" "$runtime_dir/codex-five-hour-headers.txt")"
+  if [[ "$status" != 200 ]]; then
+    echo "ChatGPT 池没有 k 时余量 key 不应被 5h 预留拦截：HTTP ${status}，$(cat "$runtime_dir/responses/codex-five-hour.json")" >&2
+    return 1
+  fi
+  cc_report "$database" "$auth_index" 900000013 95 70 "$reset_5h" "$reset_7d" codex codex
+  management_call POST "$port" "$base/cc/refresh" >/dev/null
+  status="$(cc_request "$port" "$remainder_key" "$runtime_dir/responses/codex-weekly.json" "$runtime_dir/codex-weekly-headers.txt")"
+  if [[ "$status" != 429 ]] || ! jq -e '.error.message | contains("weekly reservation")' "$runtime_dir/responses/codex-weekly.json" >/dev/null; then
+    echo "ChatGPT 池周预留拦截不正确：HTTP ${status}，$(cat "$runtime_dir/responses/codex-weekly.json")" >&2
+    return 1
+  fi
+  status="$(cc_request "$port" "$fixed_key" "$runtime_dir/responses/codex-fixed-weekly.json" "$runtime_dir/codex-fixed-weekly-headers.txt")"
+  if [[ "$status" != 200 ]]; then
+    echo "ChatGPT 池周预留拦截时固定 key 也被拦下：HTTP ${status}" >&2
+    return 1
+  fi
+  log_step "ChatGPT 池：5h 用到 95% 仍放行，周用到 70% 时余量 key 被周预留拦截，固定 key 照常放行"
+
+  management_call PUT "$port" "$base/cc/settings" -H "Content-Type: application/json" \
+    --data "$(management_call GET "$port" "$base/cc" | jq -c '.cc.settings + {pools: [], accounts: {}, keys: {}}')" >/dev/null
+  management_call DELETE "$port" "$base/plans?id=$plan" >/dev/null
 }
 
 cc_balance() {
@@ -1541,6 +1636,7 @@ assert_cc_split() {
   management_call PUT "$port" "$base/cc/settings" -H "Content-Type: application/json" \
     --data "$(management_call GET "$port" "$base/cc" | jq -c '.cc.settings + {pools: [], accounts: {}, keys: {}}')" >/dev/null
   management_call DELETE "$port" "$base/plans?id=$plan" >/dev/null
+  assert_codex_split "$port" "$runtime_dir" "$fixed_key" "$fixed_scope" "$remainder_key" "$remainder_scope"
   management_call PUT "$port" "/v0/management/api-keys" -H "Content-Type: application/json" \
     --data "$(jq -nc --arg a "$remainder_key" '[$a]')" >/dev/null
 }
@@ -1992,13 +2088,13 @@ run_target() {
   assert_v8_config_migration "$port" "$runtime_dir"
   assert_reference_price_billing "$port" "$runtime_dir"
   assert_unpriced_model_policy "$port" "$runtime_dir"
-  log_step "CC 分账：周期对齐、/balance、5h 预留与周预留拦截"
+  log_step "订阅分账：Claude 池与 ChatGPT 池的周期对齐、/balance、5h 预留与周预留拦截"
   assert_cc_split "$port" "$runtime_dir"
 
   kill "$active_pid" >/dev/null 2>&1 || true
   wait "$active_pid" >/dev/null 2>&1 || true
   active_pid=""
-  log_ok "${host_label}：54 个上游请求（含 4 个参考价请求和 1 个未定价请求），1 次并发拦截，6 次模型拦截，4 次凭证路由，2 次凭证拦截，14 次额度拦截，CC 分账 4 个放行与 2 次预留拦截"
+  log_ok "${host_label}：54 个上游请求（含 4 个参考价请求和 1 个未定价请求），1 次并发拦截，6 次模型拦截，4 次凭证路由，2 次凭证拦截，14 次额度拦截，订阅分账 Claude 池 4 个放行与 2 次预留拦截、ChatGPT 池 4 个放行与 1 次周预留拦截"
 }
 
 log_stage "启动 dummy provider"

@@ -407,23 +407,25 @@ func TestResolveWeightsPrecedence(t *testing.T) {
 
 func TestWeightSettingsValidation(t *testing.T) {
 	settings := DefaultSettings()
-	settings.Weights.Items = []WeightItem{{ID: "a", Models: []string{"X"}}, {ID: "b", Models: []string{"x"}}}
+	editWeights(&settings, ProviderClaude, func(w *WeightSettings) {
+		w.Items = []WeightItem{{ID: "a", Models: []string{"X"}}, {ID: "b", Models: []string{"x"}}}
+	})
 	if _, err := settings.Normalized(); err == nil || !strings.Contains(err.Error(), "already in test item") {
 		t.Fatalf("err = %v", err)
 	}
-	settings.Weights.Items = []WeightItem{{ID: "a", Models: []string{" "}}}
+	editWeights(&settings, ProviderClaude, func(w *WeightSettings) { w.Items = []WeightItem{{ID: "a", Models: []string{" "}}} })
 	if _, err := settings.Normalized(); err == nil {
 		t.Fatal("an item needs a model")
 	}
 	zero := 0.0
-	settings.Weights.Items = []WeightItem{{ID: "a", Models: []string{"x"}, Manual: &zero}}
+	editWeights(&settings, ProviderClaude, func(w *WeightSettings) { w.Items = []WeightItem{{ID: "a", Models: []string{"x"}, Manual: &zero}} })
 	if _, err := settings.Normalized(); err == nil {
 		t.Fatal("a zero manual multiplier must be refused")
 	}
 	// Settings written before the weights existed keep their defaults.
-	settings.Weights = WeightSettings{}
+	editWeights(&settings, ProviderClaude, func(w *WeightSettings) { *w = WeightSettings{} })
 	normalized, err := settings.Normalized()
-	if err != nil || !reflectEqual(normalized.Weights, DefaultWeightSettings()) {
-		t.Fatalf("weights = %+v, %v", normalized.Weights, err)
+	if err != nil || !reflectEqual(normalized.Providers[ProviderClaude].Weights, DefaultWeightSettings()) {
+		t.Fatalf("weights = %+v, %v", normalized.Providers[ProviderClaude].Weights, err)
 	}
 }

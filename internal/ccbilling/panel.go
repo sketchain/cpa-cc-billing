@@ -9,7 +9,18 @@ import (
 )
 
 // Management page tabs an operator may hide. Settings is always shown.
-var PanelTabs = []string{"keys", "analysis", "request-events", "errors", "auth-files", "ai-providers", "cc"}
+var PanelTabs = []string{"keys", "analysis", "request-events", "errors", "auth-files", "ai-providers", "split"}
+
+// legacyPanelTabs maps former tab ids to the current ones: the subscription
+// split page was the "cc" tab.
+var legacyPanelTabs = map[string]string{"cc": "split"}
+
+func currentPanelTab(tab string) string {
+	if current, ok := legacyPanelTabs[tab]; ok {
+		return current
+	}
+	return tab
+}
 
 // PanelSettings are management page preferences shared by every operator.
 // They only change what the page shows and whether API key users may open
@@ -36,13 +47,17 @@ func DefaultPanelSettings() PanelSettings {
 // hidden tabs in page order.
 func (s PanelSettings) Normalized() (PanelSettings, error) {
 	hidden := []string{}
+	tabs := make([]string, 0, len(s.HiddenTabs))
 	for _, tab := range s.HiddenTabs {
+		tabs = append(tabs, currentPanelTab(tab))
+	}
+	for _, tab := range tabs {
 		if !slices.Contains(PanelTabs, tab) {
 			return PanelSettings{}, fmt.Errorf("Unknown page %q; the settings page cannot be hidden", tab)
 		}
 	}
 	for _, tab := range PanelTabs {
-		if slices.Contains(s.HiddenTabs, tab) {
+		if slices.Contains(tabs, tab) {
 			hidden = append(hidden, tab)
 		}
 	}
@@ -64,7 +79,7 @@ func loadPanelSettings(db *sql.DB) (PanelSettings, error) {
 	}
 	if stored.HiddenTabs != nil {
 		// A page a later version added and this one lacks is dropped.
-		settings.HiddenTabs = slices.DeleteFunc(*stored.HiddenTabs, func(tab string) bool { return !slices.Contains(PanelTabs, tab) })
+		settings.HiddenTabs = slices.DeleteFunc(*stored.HiddenTabs, func(tab string) bool { return !slices.Contains(PanelTabs, currentPanelTab(tab)) })
 	}
 	if stored.AccountSelfService != nil {
 		settings.AccountSelfService = *stored.AccountSelfService

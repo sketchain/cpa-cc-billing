@@ -637,7 +637,9 @@ func TestCCQuotaWeightEndpoints(t *testing.T) {
 	}
 	callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, &current)
 	settings := current.CC.Settings
-	settings.Weights.Items = []ccbilling.WeightItem{{ID: "test", Name: "Test", Models: []string{strings.ToUpper(ccModel)}}}
+	claude := settings.Providers[ccbilling.ProviderClaude]
+	claude.Weights.Items = []ccbilling.WeightItem{{ID: "test", Name: "Test", Models: []string{strings.ToUpper(ccModel)}}}
+	settings.Providers[ccbilling.ProviderClaude] = claude
 	callOK(t, app, http.MethodPut, routeCCConfig, nil, settings, http.StatusOK, nil)
 
 	var view struct {
@@ -645,7 +647,7 @@ func TestCCQuotaWeightEndpoints(t *testing.T) {
 		Prices map[string]billing.PriceMultiplier `json:"price_multipliers"`
 	}
 	callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, &view)
-	weights := view.CC.Weights
+	weights := view.CC.Weights[ccbilling.ProviderClaude]
 	if len(weights.Models) != 1 || weights.Models[0].Model != ccModel || weights.Models[0].ItemID != "test" || weights.UnsplitSegments != 0 {
 		t.Fatalf("weights = %+v", weights)
 	}
@@ -677,7 +679,8 @@ func TestCCQuotaWeightEndpoints(t *testing.T) {
 		Estimates ccbilling.Estimates `json:"estimates"`
 	}
 	callOK(t, app, http.MethodGet, routeCCEstim, nil, nil, http.StatusOK, &estimates)
-	if estimates.Estimates.Basis != ccbilling.BasisRaw || len(estimates.Estimates.Accounts) != 1 || len(estimates.Estimates.Weights) != 1 {
+	if claudeWeights := estimates.Estimates.For(ccbilling.ProviderClaude); claudeWeights.Basis != ccbilling.BasisRaw ||
+		len(estimates.Estimates.Accounts) != 1 || len(claudeWeights.Weights) != 1 {
 		t.Fatalf("estimates = %+v", estimates.Estimates)
 	}
 }

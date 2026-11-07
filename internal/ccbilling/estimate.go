@@ -42,8 +42,12 @@ type Estimate struct {
 	ExcludedSegments int            `json:"excluded_segments"`
 	// Ratio is the global weighted average in points per USD; zero when unknown.
 	Ratio float64 `json:"ratio"`
-	// FiveHourUSD is 100 / Ratio: the 5-hour window's total in USD.
+	// FiveHourUSD is 100 / Ratio: the total in USD of the window the
+	// segments measure, the 5-hour window unless Window says otherwise.
 	FiveHourUSD float64 `json:"five_hour_usd"`
+	// Window is the window the segments measure: WindowFiveHour, or
+	// WindowWeek for an account whose reports have no 5-hour window.
+	Window string `json:"segment_window,omitempty"`
 }
 
 // EstimateSegments filters each block of chronologically ordered segments and

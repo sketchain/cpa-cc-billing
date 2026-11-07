@@ -16,7 +16,7 @@ import (
 // keeps client model pickers accurate; admission still enforces the rules, so
 // a request may simply ask for the full catalog.
 const (
-	modelCatalogHeader       = "X-CPA-CC-Billing-Models"
+	modelCatalogHeader       = "X-CPA-Super-Billing-Models"
 	claudeCloakedModelPrefix = "claude-fable-5-dd-"
 )
 

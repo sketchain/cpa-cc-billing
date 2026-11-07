@@ -32,10 +32,10 @@ type BasisConversion struct {
 	Priced []string `json:"priced_models"`
 }
 
-// NewBasisConversion builds the conversion of the estimates' basis. prices
-// holds, by model, the price table multiplier of models with a custom price
-// whose input and output multipliers agree.
-func NewBasisConversion(estimates Estimates, prices map[string]float64) BasisConversion {
+// NewBasisConversion builds the conversion of one provider's estimates'
+// basis. prices holds, by model, the price table multiplier of models with a
+// custom price whose input and output multipliers agree.
+func NewBasisConversion(estimates ProviderWeights, prices map[string]float64) BasisConversion {
 	conversion := BasisConversion{Basis: estimates.Basis, Factors: map[string]float64{}, Priced: []string{}}
 	if conversion.Basis == "" {
 		conversion.Basis = BasisRaw
@@ -156,14 +156,14 @@ type WindowPoint struct {
 	Reset time.Time `json:"reset_at,omitzero"`
 }
 
-// readWindowPoints reads an account's reports of one unified window made in
+// readWindowPoints reads an account's reports of one main window made in
 // (from, to], oldest first.
-func readWindowPoints(db *sql.DB, authIndex string, length time.Duration, from, to time.Time) ([]WindowPoint, error) {
+func readWindowPoints(db *sql.DB, source QuotaSource, authIndex string, length time.Duration, from, to time.Time) ([]WindowPoint, error) {
 	rows, err := db.Query(`SELECT at, used_percent, reset_at FROM quota_report_windows
 		WHERE auth_index = ? AND provider = ? AND limit_key = ? AND seconds = ? AND at > ? AND at <= ? ORDER BY at, request_event_id`,
-		authIndex, claudeProvider, claudeLimitKey, int64(length/time.Second), nanos(from), nanos(to))
+		authIndex, source.Provider, source.LimitKey, int64(length/time.Second), nanos(from), nanos(to))
 	if err != nil {
-		return nil, fmt.Errorf("Read Claude quota reports: %w", err)
+		return nil, fmt.Errorf("Read quota reports: %w", err)
 	}
 	defer rows.Close()
 	var points []WindowPoint
@@ -171,7 +171,7 @@ func readWindowPoints(db *sql.DB, authIndex string, length time.Duration, from, 
 		var at, reset int64
 		var used float64
 		if err := rows.Scan(&at, &used, &reset); err != nil {
-			return nil, fmt.Errorf("Read Claude quota reports: %w", err)
+			return nil, fmt.Errorf("Read quota reports: %w", err)
 		}
 		points = append(points, WindowPoint{At: timeAt(at), Used: used, Reset: timeAt(reset)})
 	}
@@ -179,17 +179,17 @@ func readWindowPoints(db *sql.DB, authIndex string, length time.Duration, from, 
 }
 
 // lastWindowPoint is an account's latest report of a window made at or before at.
-func lastWindowPoint(db *sql.DB, authIndex string, length time.Duration, at time.Time) (WindowPoint, bool, error) {
+func lastWindowPoint(db *sql.DB, source QuotaSource, authIndex string, length time.Duration, at time.Time) (WindowPoint, bool, error) {
 	var point WindowPoint
 	var when, reset int64
 	err := db.QueryRow(`SELECT at, used_percent, reset_at FROM quota_report_windows
 		WHERE auth_index = ? AND provider = ? AND limit_key = ? AND seconds = ? AND at <= ? ORDER BY at DESC, request_event_id DESC LIMIT 1`,
-		authIndex, claudeProvider, claudeLimitKey, int64(length/time.Second), nanos(at)).Scan(&when, &point.Used, &reset)
+		authIndex, source.Provider, source.LimitKey, int64(length/time.Second), nanos(at)).Scan(&when, &point.Used, &reset)
 	switch {
 	case err == sql.ErrNoRows:
 		return WindowPoint{}, false, nil
 	case err != nil:
-		return WindowPoint{}, false, fmt.Errorf("Read Claude quota reports: %w", err)
+		return WindowPoint{}, false, fmt.Errorf("Read quota reports: %w", err)
 	}
 	point.At, point.Reset = timeAt(when), timeAt(reset)
 	return point, true, nil
@@ -198,12 +198,12 @@ func lastWindowPoint(db *sql.DB, authIndex string, length time.Duration, at time
 // readHourlyPoints reads an account's last report of a window in each UTC
 // hour of [from, to), oldest first. SQLite takes the bare columns from the
 // row holding max(at).
-func readHourlyPoints(db *sql.DB, authIndex string, length time.Duration, from, to time.Time) ([]WindowPoint, error) {
+func readHourlyPoints(db *sql.DB, source QuotaSource, authIndex string, length time.Duration, from, to time.Time) ([]WindowPoint, error) {
 	rows, err := db.Query(fmt.Sprintf(`SELECT at / %d AS hour, max(at), used_percent, reset_at FROM quota_report_windows
 		WHERE auth_index = ? AND provider = ? AND limit_key = ? AND seconds = ? AND at >= ? AND at < ? GROUP BY hour ORDER BY hour`, int64(time.Hour)),
-		authIndex, claudeProvider, claudeLimitKey, int64(length/time.Second), nanos(from), nanos(to))
+		authIndex, source.Provider, source.LimitKey, int64(length/time.Second), nanos(from), nanos(to))
 	if err != nil {
-		return nil, fmt.Errorf("Read Claude quota reports: %w", err)
+		return nil, fmt.Errorf("Read quota reports: %w", err)
 	}
 	defer rows.Close()
 	var points []WindowPoint
@@ -211,7 +211,7 @@ func readHourlyPoints(db *sql.DB, authIndex string, length time.Duration, from, 
 		var hour, at, reset int64
 		var used float64
 		if err := rows.Scan(&hour, &at, &used, &reset); err != nil {
-			return nil, fmt.Errorf("Read Claude quota reports: %w", err)
+			return nil, fmt.Errorf("Read quota reports: %w", err)
 		}
 		points = append(points, WindowPoint{At: timeAt(at), Used: used, Reset: timeAt(reset)})
 	}
@@ -225,19 +225,19 @@ type ResetSeen struct {
 	FirstSeen time.Time
 }
 
-func readWeeklyResets(db *sql.DB, authIndex string, from time.Time) ([]ResetSeen, error) {
+func readWeeklyResets(db *sql.DB, source QuotaSource, authIndex string, from time.Time) ([]ResetSeen, error) {
 	rows, err := db.Query(`SELECT reset_at, min(at) FROM quota_report_windows
 		WHERE auth_index = ? AND provider = ? AND limit_key = ? AND seconds = ? AND at >= ? AND reset_at > 0 GROUP BY reset_at ORDER BY reset_at`,
-		authIndex, claudeProvider, claudeLimitKey, int64(Week/time.Second), nanos(from))
+		authIndex, source.Provider, source.LimitKey, int64(Week/time.Second), nanos(from))
 	if err != nil {
-		return nil, fmt.Errorf("Read Claude quota reports: %w", err)
+		return nil, fmt.Errorf("Read quota reports: %w", err)
 	}
 	defer rows.Close()
 	var result []ResetSeen
 	for rows.Next() {
 		var reset, first int64
 		if err := rows.Scan(&reset, &first); err != nil {
-			return nil, fmt.Errorf("Read Claude quota reports: %w", err)
+			return nil, fmt.Errorf("Read quota reports: %w", err)
 		}
 		result = append(result, ResetSeen{Reset: timeAt(reset), FirstSeen: timeAt(first)})
 	}

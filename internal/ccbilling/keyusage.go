@@ -76,9 +76,10 @@ type KeySeries struct {
 
 // PoolKeyUsage is a pool's keys.
 type PoolKeyUsage struct {
-	ID   string      `json:"id"`
-	Name string      `json:"name"`
-	Keys []KeySeries `json:"keys"`
+	ID       string      `json:"id"`
+	Name     string      `json:"name"`
+	Provider string      `json:"provider"`
+	Keys     []KeySeries `json:"keys"`
 }
 
 // KeyUsage is every pool's key use over the retained history.
@@ -128,7 +129,7 @@ func (m *Manager) KeyUsage(retainedFrom time.Time) (KeyUsage, error) {
 		}
 		for _, pool := range settings.Pools {
 			if len(pool.AuthIndexes) > 0 {
-				if resets[pool.ID], err = readWeeklyResets(db, pool.AuthIndexes[0], from.Add(-Week)); err != nil {
+				if resets[pool.ID], err = readWeeklyResets(db, settings.accountSource(pool.AuthIndexes[0]), pool.AuthIndexes[0], from.Add(-Week)); err != nil {
 					return err
 				}
 			}
@@ -151,7 +152,7 @@ func (m *Manager) KeyUsage(retainedFrom time.Time) (KeyUsage, error) {
 	}
 	latest, _ := m.live(snap)
 	for _, pool := range settings.Pools {
-		usage := PoolKeyUsage{ID: pool.ID, Name: pool.Name, Keys: []KeySeries{}}
+		usage := PoolKeyUsage{ID: pool.ID, Name: pool.Name, Provider: pool.Provider, Keys: []KeySeries{}}
 		var cycles []Cycle
 		if len(pool.AuthIndexes) > 0 {
 			current := accountStatus(snap, latest, pool.AuthIndexes[0], now).Reset7d

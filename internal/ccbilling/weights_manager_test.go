@@ -69,7 +69,9 @@ func TestWeightsSwitchConvertsOnlyWhenOn(t *testing.T) {
 	manager, host := weightedHost(t)
 	settings := DefaultSettings()
 	settings.Pools = []Pool{{ID: "p", AuthIndexes: []string{"a1"}}}
-	settings.Weights.Items = []WeightItem{{ID: "fable", Name: "Fable", Models: []string{"claude-fable"}}}
+	editWeights(&settings, ProviderClaude, func(w *WeightSettings) {
+		w.Items = []WeightItem{{ID: "fable", Name: "Fable", Models: []string{"claude-fable"}}}
+	})
 	if _, err := manager.SetSettings(settings); err != nil {
 		t.Fatal(err)
 	}
@@ -86,16 +88,16 @@ func TestWeightsSwitchConvertsOnlyWhenOn(t *testing.T) {
 	snap := manager.snap.Load()
 	account := snap.accounts["a1"]
 	// Off: exactly the estimate without weights, value for value.
-	if snap.weights.basis != BasisRaw || !reflect.DeepEqual(account.estimate, EstimateSegments(segments, params, snap.at)) ||
+	if snap.weights[ProviderClaude].basis != BasisRaw || !reflect.DeepEqual(account.estimate, EstimateSegments(segments, params, snap.at)) ||
 		!reflect.DeepEqual(account.estimate, account.raw) {
 		t.Fatal("the switched-off estimate differs from the raw estimate")
 	}
-	effective := snap.weights.effective[0]
+	effective := snap.weights[ProviderClaude].effective[0]
 	if effective.Source != WeightSourceEstimated || math.Abs(effective.Multiplier-4) > 0.2 {
-		t.Fatalf("effective = %+v, estimate = %+v", effective, snap.weights.estimate)
+		t.Fatalf("effective = %+v, estimate = %+v", effective, snap.weights[ProviderClaude].estimate)
 	}
 	off, _ := manager.Estimates()
-	if off.Basis != BasisRaw || off.Accounts["a1"].Ratio != account.raw.Ratio {
+	if off.For(ProviderClaude).Basis != BasisRaw || off.Accounts["a1"].Ratio != account.raw.Ratio {
 		t.Fatalf("estimates = %+v", off)
 	}
 	// The raw basis excludes Fable-heavy segments as if they were outside usage.
@@ -103,14 +105,14 @@ func TestWeightsSwitchConvertsOnlyWhenOn(t *testing.T) {
 		t.Fatalf("excluded raw %d, weighted %d", account.raw.ExcludedSegments, account.weighted.ExcludedSegments)
 	}
 
-	settings.Weights.Enabled = true
+	editWeights(&settings, ProviderClaude, func(w *WeightSettings) { w.Enabled = true })
 	if _, err := manager.SetSettings(settings); err != nil {
 		t.Fatal(err)
 	}
 	snap = manager.snap.Load()
 	account = snap.accounts["a1"]
-	factors := map[string]float64{"claude-fable": snap.weights.effective[0].Multiplier}
-	if snap.weights.basis != BasisWeighted || !reflect.DeepEqual(snap.weights.factors, factors) ||
+	factors := map[string]float64{"claude-fable": snap.weights[ProviderClaude].effective[0].Multiplier}
+	if snap.weights[ProviderClaude].basis != BasisWeighted || !reflect.DeepEqual(snap.weights[ProviderClaude].factors, factors) ||
 		!reflect.DeepEqual(account.estimate, EstimateSegments(ConvertSegments(segments, factors), params, snap.at)) {
 		t.Fatal("the switched-on estimate is not the estimate of the converted costs")
 	}
@@ -119,25 +121,25 @@ func TestWeightsSwitchConvertsOnlyWhenOn(t *testing.T) {
 		t.Fatalf("weighted 5-hour total = %.2f", account.estimate.FiveHourUSD)
 	}
 	on, ok := manager.Estimates()
-	if !ok || on.Basis != BasisWeighted || on.Accounts["a1"].Ratio != account.weighted.Ratio || len(on.Weights) != 1 {
+	if !ok || on.For(ProviderClaude).Basis != BasisWeighted || on.Accounts["a1"].Ratio != account.weighted.Ratio || len(on.For(ProviderClaude).Weights) != 1 {
 		t.Fatalf("estimates = %+v", on)
 	}
 	view, err := manager.View()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(view.Weights.Comparison) != 1 || view.Weights.Comparison[0].Raw.Ratio != account.raw.Ratio ||
-		view.Weights.Comparison[0].Weighted.Ratio != account.weighted.Ratio || len(view.Weights.Models) != 3 {
+	if len(view.Weights[ProviderClaude].Comparison) != 1 || view.Weights[ProviderClaude].Comparison[0].Raw.Ratio != account.raw.Ratio ||
+		view.Weights[ProviderClaude].Comparison[0].Weighted.Ratio != account.weighted.Ratio || len(view.Weights[ProviderClaude].Models) != 3 {
 		t.Fatalf("weights view = %+v", view.Weights)
 	}
 
 	// A manual multiplier takes precedence.
 	manual := 2.0
-	settings.Weights.Items[0].Manual = &manual
+	editWeights(&settings, ProviderClaude, func(w *WeightSettings) { w.Items[0].Manual = &manual })
 	if _, err := manager.SetSettings(settings); err != nil {
 		t.Fatal(err)
 	}
-	if weight := manager.snap.Load().weights.effective[0]; weight.Source != WeightSourceManual || weight.Multiplier != 2 {
+	if weight := manager.snap.Load().weights[ProviderClaude].effective[0]; weight.Source != WeightSourceManual || weight.Multiplier != 2 {
 		t.Fatalf("effective = %+v", weight)
 	}
 	// Trend marks the exclusions of the converted costs.
@@ -161,7 +163,7 @@ func TestCalibrationLifecycle(t *testing.T) {
 	})
 	settings := DefaultSettings()
 	settings.Pools = []Pool{{ID: "p", AuthIndexes: []string{"a1"}}}
-	settings.Weights.Items = []WeightItem{{ID: "fable", Models: []string{"claude-fable"}}}
+	editWeights(&settings, ProviderClaude, func(w *WeightSettings) { w.Items = []WeightItem{{ID: "fable", Models: []string{"claude-fable"}}} })
 	if _, err := manager.SetSettings(settings); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +183,7 @@ func TestCalibrationLifecycle(t *testing.T) {
 		t.Fatalf("a second calibration of the account: %v", err)
 	}
 	host.now = time.Date(2026, 9, 15, 23, 0, 0, 0, time.UTC)
-	if calibrations := manager.snap.Load().weights.calibrations; len(calibrations) != 1 || calibrations[0].Final ||
+	if calibrations := manager.snap.Load().weights[ProviderClaude].calibrations; len(calibrations) != 1 || calibrations[0].Final ||
 		calibrations[0].Result.Status != CalibrationRunning {
 		t.Fatalf("calibrations = %+v", calibrations)
 	}
@@ -189,7 +191,7 @@ func TestCalibrationLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The history was processed past the period, so the result is final.
-	calibrations := manager.snap.Load().weights.calibrations
+	calibrations := manager.snap.Load().weights[ProviderClaude].calibrations
 	if len(calibrations) != 1 || !calibrations[0].Final {
 		t.Fatalf("calibrations = %+v", calibrations)
 	}
@@ -198,7 +200,7 @@ func TestCalibrationLifecycle(t *testing.T) {
 	if result.Status != CalibrationOK || result.BaseFrom != CalibrationBaseRecent || math.Abs(*result.Multiplier-4) > math.Max(3*result.StdErr, 0.1) {
 		t.Fatalf("result = %+v", result)
 	}
-	if weight := manager.snap.Load().weights.effective[0]; weight.Source != WeightSourceCalibration || weight.CalibrationID != calibration.ID {
+	if weight := manager.snap.Load().weights[ProviderClaude].effective[0]; weight.Source != WeightSourceCalibration || weight.CalibrationID != calibration.ID {
 		t.Fatalf("effective = %+v", weight)
 	}
 	var stored string
@@ -214,7 +216,7 @@ func TestCalibrationLifecycle(t *testing.T) {
 	if err := manager.DeleteCalibration(calibration.ID); !IsCalibrationNotFound(err) {
 		t.Fatalf("deleting twice: %v", err)
 	}
-	if calibrations := manager.snap.Load().weights.calibrations; len(calibrations) != 0 {
+	if calibrations := manager.snap.Load().weights[ProviderClaude].calibrations; len(calibrations) != 0 {
 		t.Fatalf("calibrations = %+v", calibrations)
 	}
 }
@@ -259,8 +261,8 @@ func TestUpgradeKeepsSegmentsAndRebuildAddsTheirSplit(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := storedSegments(t, host, "a1")
-	if len(after) != len(before) || view.Weights.UnsplitSegments == 0 || view.Weights.Segments != len(before) {
-		t.Fatalf("segments %d → %d, unsplit %d", len(before), len(after), view.Weights.UnsplitSegments)
+	if len(after) != len(before) || view.Weights[ProviderClaude].UnsplitSegments == 0 || view.Weights[ProviderClaude].Segments != len(before) {
+		t.Fatalf("segments %d → %d, unsplit %d", len(before), len(after), view.Weights[ProviderClaude].UnsplitSegments)
 	}
 	for i := range after {
 		if after[i].Split() && after[i].CostUSD > 0 || after[i].CostUSD != before[i].CostUSD || after[i].Gain != before[i].Gain {

@@ -41,12 +41,17 @@ function ccItemPrice(data, item) {
   return { known: true, input, output, custom: prices.some((price) => price.custom) };
 }
 
+// The model quota weights of the provider on display: each provider's
+// accounts have their own multipliers.
+function ccProviderWeights(data) { return data.cc.weights?.[ccState.provider] || data.cc.weights?.claude; }
+
 function ccWeightsSection(data, draft) {
-  const weights = data.cc.weights;
-  draft.weights ||= structuredClone(data.cc.settings.weights);
-  const dw = draft.weights;
+  const weights = ccProviderWeights(data);
+  const profile = ccProfile(draft);
+  profile.weights ||= structuredClone(data.cc.settings.providers[ccState.provider].weights);
+  const dw = profile.weights;
   dw.items ||= [];
-  const saved = data.cc.settings.weights.items;
+  const saved = data.cc.settings.providers?.[ccState.provider]?.weights?.items || [];
   const estimates = new Map((weights.estimate.items || []).map((item) => [item.id, item]));
   const effective = new Map(weights.effective.map((item) => [item.id, item]));
   const owner = (model) => dw.items.find((item) => item.models.includes(model));
@@ -284,8 +289,9 @@ function ccWeightsSection(data, draft) {
 const ccCalibrationChoice = { item: "", account: "" };
 
 function ccCalibrationBlock(data, saved) {
-  const calibrations = data.cc.weights.calibrations;
-  const accounts = data.cc.accounts.map((account) => account.auth_index);
+  const calibrations = ccProviderWeights(data).calibrations;
+  const accounts = data.cc.accounts.filter((account) => (account.provider || "claude") === ccState.provider)
+    .map((account) => account.auth_index);
   if (!saved.some((item) => item.id === ccCalibrationChoice.item)) ccCalibrationChoice.item = saved[0]?.id || "";
   if (!accounts.includes(ccCalibrationChoice.account)) ccCalibrationChoice.account = accounts[0] || "";
   const running = new Set(calibrations.filter((item) => !item.ended_at).map((item) => item.auth_index));
@@ -400,7 +406,7 @@ function ccCalibrationBlock(data, saved) {
 }
 
 function ccComparisonBlock(data) {
-  const weights = data.cc.weights;
+  const weights = ccProviderWeights(data);
   const active = weights.basis;
   const cells = (values, basis) => {
     const attrs = { class: basis === active ? "cc-basis-active" : "" };
@@ -429,7 +435,7 @@ function ccComparisonBlock(data) {
         m("cc.weights_weighted_segments")
       ],
       rows,
-      m("cc.no_claude_accounts")
+      m("cc.no_provider_accounts", { v0: ccProviderLabel(ccState.provider) })
     )
   );
 }

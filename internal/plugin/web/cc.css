@@ -149,3 +149,4 @@
   .cc-forecast-windows { width: 100%; }
   .cc-forecast-window { flex: 1 1 100%; justify-content: space-between; }
 }
+.cc-suggested-tier { display: block; margin-top: 4px; }

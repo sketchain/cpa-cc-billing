@@ -31,7 +31,7 @@ function loadCharts() {
 function renderLoadedCharts() {
   const account = currentRole === "account";
   if (currentRole && activeTab(account) === "analysis" && analysisQueries[currentRole].value) renderAnalysis(account);
-  if (currentRole === "admin" && activeTab(false) === "cc") renderCCTrend();
+  if (currentRole === "admin" && activeTab(false) === "split") renderCCTrend();
 }
 
 function loadAnalysis(account, reload) {
