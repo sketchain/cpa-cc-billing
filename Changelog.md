@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.3.0
+
+### 升级须知
+
+- 插件改名为 `cpa-super-billing`（显示名 CPA Super Billing，仓库 `sketchain/cpa-super-billing`）。CLIProxyAPI 按动态库文件名识别插件，改名等于安装新插件，需要手动迁移：停止 CLIProxyAPI → 备份 `plugins/cpa-cc-billing-state-v1.db`（连同 `-wal`、`-shm`）→ 删除 `plugins` 目录里所有 `cpa-cc-billing*.so`（`.dll`/`.dylib`）并放入新插件 → 把 `config.yaml` 里 `plugins.configs.cpa-cc-billing` 整段改名为 `plugins.configs.cpa-super-billing`（含 `store` 版本锁）→ `plugins.store-sources` 改为新仓库的 `registry.json` → new-api 渠道余额路由的 `upstream_path` 改为 `/v0/resource/plugins/cpa-super-billing/balance` → 启动。
+- 新旧两个动态库不能同时留在 `plugins` 目录：两者会同时加载，请求被拦截两次、用量记两次账。
+- 没有显式配置 `state_file` 时，默认数据库改为 `plugins/cpa-super-billing-state-v1.db`；该文件不存在而旧库存在时，启动时自动完整复制旧库（与迁移前备份相同的 `VACUUM INTO` 和校验）后打开副本，旧库保留不动，插件日志和订阅分账页会提示，确认无误后可手动删除。复制失败时插件不启动；显式配置了 `state_file` 时按配置打开，不做复制。
+- 管理页地址改为 `/v0/resource/plugins/cpa-super-billing/ui`，管理接口前缀改为 `/v0/management/plugins/cpa-super-billing`；拦截响应的错误类型改为 `cpa_super_billing_error`。浏览器里保存的登录凭证、主题、语言和视图偏好在首次打开新页面时自动沿用。
+
+### 后端
+
+- 「CC 分账」泛化为多订阅分账，新增 ChatGPT Team 订阅号（经 CPA 的 Codex 渠道）：读取 `X-Codex-Primary/Secondary-*` 的 5h / 7d 用量，固定 key、余量 key、周预留、5h 预留、余额接口与 Claude 相同。
+- 分账池按订阅类型区分，一个池只能放同一类型的账号（保存时校验并给出翻译后的报错）；每个 key 仍只属于一个池，按所在池的订阅类型放行和上报余额。旧设置自动归入 Claude，档位默认值、默认 k 和模型额度倍率迁到 Claude 的配置下，Claude 的估算、预留和放行结果与之前一致。
+- 档位表、默认 k 和部分参数（大块间隔、滑动窗口宽度、k 所需 7d 涨幅、冷启动大块数、安全折扣）可按订阅类型设置；模型额度倍率按订阅类型分别估算。ChatGPT 只有 Team 档位，默认周总额 $60，没有默认 k。
+- 用量百分比带小数时，以跨过整数百分点为界切段；账号只有 7d 窗口时按 7d 切段，不需要 k，也没有 5h 预留。
+- 没有手动或估算出的 k 时，不再用默认值硬算：5h 预留关闭，周预留照常，并提示需要设置 k。
+- ChatGPT 只按主额度计入切段：只带 Spark 等额外额度池、Code Review、图像窗口或非 premium 的请求，以及没有用量报告或模型未定价的请求不计入，被排除的成本单独统计；额度用满或 credits 被消耗时暂停该账号的估算更新，恢复后自动继续。
+- 认证文件页的分账估算同时覆盖 ChatGPT 账号；根据 `X-Codex-Plan-Type` 推荐档位。
+
+### 前端
+
+- 「CC 分账」页改名为「订阅分账」，顶部按 Claude / ChatGPT 分页签，账号、池、key 分配、预测、趋势、模拟和模型倍率都按订阅类型展示；设置里隐藏的旧 CC 页签自动对应到新页签。
+- 参数区可编辑各订阅类型的档位周总额和默认 k，以及按订阅类型覆盖的参数。
+- 新增提示：需要设置 k 的账号、估算暂停的账号、仅 7d 窗口的账号、未计入估算的成本和未定价模型、路由规则没有限定到所在池订阅类型的 key，以及从旧库复制数据库的说明。只有 7d 窗口或没有 k 的账号，额度趋势不画依赖 k 的曲线并加以说明。
+
 ## v0.2.1
 
 ### 升级须知
