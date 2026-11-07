@@ -1,6 +1,6 @@
 //go:build cshared
 
-// Command cpa-cc-billing is the C ABI entry point of the CLIProxyAPI plugin.
+// Command cpa-super-billing is the C ABI entry point of the CLIProxyAPI plugin.
 // It is built with -buildmode=c-shared and contains no logic beyond marshalling
 // between the C boundary and internal/plugin.
 package main
@@ -66,7 +66,7 @@ import (
 	"net/http"
 	"unsafe"
 
-	"cpa-cc-billing/internal/plugin"
+	"cpa-super-billing/internal/plugin"
 )
 
 var app = plugin.NewApp()

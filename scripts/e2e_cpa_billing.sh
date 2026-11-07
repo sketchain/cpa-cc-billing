@@ -49,8 +49,8 @@ esac
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 repo_dir="$(CDPATH= cd -- "$script_dir/.." && pwd)"
-cache_dir="${CPA_E2E_CACHE_DIR:-${TMPDIR:-/tmp}/cpa-cc-billing-e2e-cache}"
-run_dir="$(mktemp -d "${TMPDIR:-/tmp}/cpa-cc-billing-e2e.XXXXXX")"
+cache_dir="${CPA_E2E_CACHE_DIR:-${TMPDIR:-/tmp}/cpa-super-billing-e2e-cache}"
+run_dir="$(mktemp -d "${TMPDIR:-/tmp}/cpa-super-billing-e2e.XXXXXX")"
 active_pid=""
 upstream_pid=""
 upstream_port=""
@@ -89,21 +89,21 @@ log_ok() {
 }
 
 mkdir -p "$cache_dir" "$run_dir/plugin"
-plugin_path="$run_dir/plugin/cpa-cc-billing.$plugin_extension"
+plugin_path="$run_dir/plugin/cpa-super-billing.$plugin_extension"
 log_stage "构建计费插件"
 (
   cd "$repo_dir"
   GOCACHE="$cache_dir/go-build" CGO_ENABLED=1 \
     go build -buildvcs=false -tags cshared -buildmode=c-shared \
-    -o "$plugin_path" ./cmd/cpa-cc-billing
+    -o "$plugin_path" ./cmd/cpa-super-billing
 )
-rm -f "$run_dir/plugin/cpa-cc-billing.h"
+rm -f "$run_dir/plugin/cpa-super-billing.h"
 
 github_json() {
   curl -fsSL \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
-    -H "User-Agent: cpa-cc-billing-e2e" \
+    -H "User-Agent: cpa-super-billing-e2e" \
     "$1"
 }
 
@@ -275,7 +275,7 @@ protocol_label() {
 }
 
 # Client headers the plugin records with each request's origin.
-e2e_user_agent="cpa-cc-billing-e2e/1.0"
+e2e_user_agent="cpa-super-billing-e2e/1.0"
 e2e_forwarded_for="192.0.2.10, 198.51.100.20"
 
 # Each client API authenticates the downstream key its own way.
@@ -441,7 +441,7 @@ wait_for_event_count() {
   local attempt=0 actual_count=0
 
   while (( attempt < 50 )); do
-    if ! management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/events?limit=100" >"$request_events_file"; then
+    if ! management_call GET "$port" "/v0/management/plugins/cpa-super-billing/events?limit=100" >"$request_events_file"; then
       echo "读取请求事件失败。" >&2
       return 1
     fi
@@ -551,11 +551,11 @@ assert_route_model_policy() {
 
   # Synchronize the Key list the way the panel does, so this holds whether or
   # not traffic has already created the record.
-  management_call POST "$port" "/v0/management/plugins/cpa-cc-billing/keys/sync" \
+  management_call POST "$port" "/v0/management/plugins/cpa-super-billing/keys/sync" \
     -H "Content-Type: application/json" \
     --data '{"keys":["e2e-downstream-key"]}' \
     >/dev/null
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/keys" >"$runtime_dir/access.json"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/keys" >"$runtime_dir/access.json"
   scope="$(jq -er 'first(.keys[] | select(.in_config) | .scope)' "$runtime_dir/access.json")"
   if ! jq -e --arg scope "$scope" 'first(.keys[] | select(.scope == $scope)) | all(.route_bindings[]; length == 0)' \
     "$runtime_dir/access.json" >/dev/null; then
@@ -563,12 +563,12 @@ assert_route_model_policy() {
     return 1
   fi
 
-  management_call POST "$port" "/v0/management/plugins/cpa-cc-billing/routes" \
+  management_call POST "$port" "/v0/management/plugins/cpa-super-billing/routes" \
     -H "Content-Type: application/json" \
     --data '{"name":"e2e-限定路由","rule":{"models":["codex/gpt-5.6-sol"],"credential_ids":[],"credential_providers":[]}}' \
 	>"$runtime_dir/route.json"
   route="$(jq -er '.route.id' "$runtime_dir/route.json")"
-  management_call PUT "$port" "/v0/management/plugins/cpa-cc-billing/keys/routes" \
+  management_call PUT "$port" "/v0/management/plugins/cpa-super-billing/keys/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg scope "$scope" --arg route "$route" '{scope: $scope, bindings: {route_ids:[$route],models:[],credential_ids:[],credential_providers:[{source:"ai-providers",provider:"openai-compatible-dummy-chat-e2e"}]}}')" \
     >/dev/null
@@ -595,12 +595,12 @@ assert_route_model_policy() {
     fi
   done
 
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/events?limit=100" >"$request_events_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/events?limit=100" >"$request_events_file"
   if [[ "$(jq -er '.entries | length' "$request_events_file")" != "$expected_count" ]]; then
     echo "被拦截的请求进入了请求事件。" >&2
     return 1
   fi
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/plugin-logs?level=debug" >"$plugin_logs_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/plugin-logs?level=debug" >"$plugin_logs_file"
   if ! jq -e --arg model "gpt-5.6-sol" '
       [.entries[]
         | select(.level == "debug" and (.message | startswith("route ")))
@@ -613,11 +613,11 @@ assert_route_model_policy() {
 
   # Clear the routing restrictions. The request that follows has to be billed
   # exactly like any other.
-  management_call PUT "$port" "/v0/management/plugins/cpa-cc-billing/keys/routes" \
+  management_call PUT "$port" "/v0/management/plugins/cpa-super-billing/keys/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg scope "$scope" '{scope: $scope, bindings: {}}')" \
     >/dev/null
-  management_call DELETE "$port" "/v0/management/plugins/cpa-cc-billing/routes?id=$route" >/dev/null
+  management_call DELETE "$port" "/v0/management/plugins/cpa-super-billing/routes?id=$route" >/dev/null
 
   body="$(request_body chat "gpt-5.6-sol" false "Reply with exactly OK.")"
   api_call "$port" "模型拦截解除后：OpenAI Chat → OpenAI Chat 非流式" \
@@ -630,7 +630,7 @@ assert_route_model_policy() {
 # Hosts with host.auth.models filter model catalogs and tell why a routed
 # request found no credential.
 credential_models_supported() {
-  account_call "$1" "/v0/resource/plugins/cpa-cc-billing/routing" |
+  account_call "$1" "/v0/resource/plugins/cpa-super-billing/routing" |
     jq -er '.catalog_filtered | if type == "boolean" then tostring else error("账户路由缺少 catalog_filtered") end'
 }
 
@@ -651,11 +651,11 @@ assert_route_blacklist_policy() {
   local scope route denied_ref body http_status requested unserved_message
   local events_file="$runtime_dir/blacklist-events.json"
   local response_file="$runtime_dir/responses/blacklist-blocked.json"
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/keys" >"$runtime_dir/blacklist-keys.json"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/keys" >"$runtime_dir/blacklist-keys.json"
   scope="$(jq -er 'first(.keys[] | select(.in_config)).scope' "$runtime_dir/blacklist-keys.json")"
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/credentials" >"$runtime_dir/blacklist-credentials.json"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/credentials" >"$runtime_dir/blacklist-credentials.json"
   denied_ref="$(jq -er 'first(.credentials[] | select(.provider == "openai-compatible-route-denied-e2e")).ref' "$runtime_dir/blacklist-credentials.json")"
-  management_call POST "$port" "/v0/management/plugins/cpa-cc-billing/routes" \
+  management_call POST "$port" "/v0/management/plugins/cpa-super-billing/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg scope "$scope" '{name:"e2e-黑名单",scopes:[$scope],rule:{denied_credential_providers:[{source:"ai-providers",provider:"openai-compatible-route-denied-e2e"}]}}')" \
     >"$runtime_dir/blacklist-route.json"
@@ -668,10 +668,10 @@ assert_route_blacklist_policy() {
     return 1
   fi
 
-  management_call PATCH "$port" "/v0/management/plugins/cpa-cc-billing/routes" \
+  management_call PATCH "$port" "/v0/management/plugins/cpa-super-billing/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg id "$route" --arg ref "$denied_ref" '{id:$id,rule:{credential_providers:[{source:"ai-providers",provider:"openai-compatible-route-allowed-e2e"},{source:"ai-providers",provider:"openai-compatible-route-denied-e2e"}],denied_credential_ids:[$ref]}}')" >/dev/null
-  management_call PUT "$port" "/v0/management/plugins/cpa-cc-billing/keys/routes" \
+  management_call PUT "$port" "/v0/management/plugins/cpa-super-billing/keys/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg scope "$scope" --arg route "$route" --arg ref "$denied_ref" '{scope:$scope,bindings:{route_ids:[$route],credential_ids:[$ref]}}')" >/dev/null
   api_call "$port" "整类白名单：指定凭证黑名单优先于 Key 直接白名单" "/v1/chat/completions" "$body" chat "$runtime_dir/responses/blacklist-exact.json"
@@ -681,7 +681,7 @@ assert_route_blacklist_policy() {
     return 1
   fi
 
-  management_call PATCH "$port" "/v0/management/plugins/cpa-cc-billing/routes" \
+  management_call PATCH "$port" "/v0/management/plugins/cpa-super-billing/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg id "$route" '{id:$id,rule:{denied_credential_providers:[{source:"ai-providers",provider:"openai-compatible-route-allowed-e2e"},{source:"ai-providers",provider:"openai-compatible-route-denied-e2e"}]}}')" >/dev/null
   IFS=$'\t' read -r _ unserved_message < <(unserved_route "$port")
@@ -691,10 +691,10 @@ assert_route_blacklist_policy() {
     return 1
   fi
 
-  management_call PATCH "$port" "/v0/management/plugins/cpa-cc-billing/routes" \
+  management_call PATCH "$port" "/v0/management/plugins/cpa-super-billing/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg id "$route" '{id:$id,rule:{denied_models:["gpt-5.6-sol"]}}')" >/dev/null
-  management_call PUT "$port" "/v0/management/plugins/cpa-cc-billing/keys/routes" \
+  management_call PUT "$port" "/v0/management/plugins/cpa-super-billing/keys/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg scope "$scope" --arg route "$route" '{scope:$scope,bindings:{route_ids:[$route],models:["gpt-5.6-sol"]}}')" >/dev/null
   for requested in "gpt-5.6-sol" "gpt-5.6-sol(high)" "gpt-5.6-sol(max)"; do
@@ -704,18 +704,18 @@ assert_route_blacklist_policy() {
       return 1
     fi
   done
-  account_call "$port" "/v0/resource/plugins/cpa-cc-billing/routing" >"$runtime_dir/blacklist-account.json"
+  account_call "$port" "/v0/resource/plugins/cpa-super-billing/routing" >"$runtime_dir/blacklist-account.json"
   if ! jq -e '.models == ["gpt-5.6-sol"] and .denied_models == ["gpt-5.6-sol"]' "$runtime_dir/blacklist-account.json" >/dev/null; then
     echo "账户权限没有保留黑白名单冲突语义。" >&2
     return 1
   fi
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/events?limit=100" >"$events_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/events?limit=100" >"$events_file"
   if [[ "$(jq -er '.entries | length' "$events_file")" != "$((expected_count + 2))" ]]; then
     echo "黑名单拦截进入了计费用量。" >&2
     return 1
   fi
-  management_call PUT "$port" "/v0/management/plugins/cpa-cc-billing/keys/routes" -H "Content-Type: application/json" --data "$(jq -nc --arg scope "$scope" '{scope:$scope,bindings:{}}')" >/dev/null
-  management_call DELETE "$port" "/v0/management/plugins/cpa-cc-billing/routes?id=$route" >/dev/null
+  management_call PUT "$port" "/v0/management/plugins/cpa-super-billing/keys/routes" -H "Content-Type: application/json" --data "$(jq -nc --arg scope "$scope" '{scope:$scope,bindings:{}}')" >/dev/null
+  management_call DELETE "$port" "/v0/management/plugins/cpa-super-billing/routes?id=$route" >/dev/null
 }
 
 catalog_ids() {
@@ -802,16 +802,16 @@ assert_route_credential_policy() {
   events_file="$runtime_dir/credential-route-events.json"
   plugin_logs_file="$runtime_dir/credential-route-plugin-logs.json"
 
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/keys" >"$access_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/keys" >"$access_file"
   scope="$(jq -er 'first(.keys[] | select(.in_config) | .scope)' "$access_file")"
   # The requested model is granted directly on the key and deliberately absent
   # from the route. Provider and exact-credential limits must still apply.
-  management_call POST "$port" "/v0/management/plugins/cpa-cc-billing/routes" \
+  management_call POST "$port" "/v0/management/plugins/cpa-super-billing/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg scope "$scope" '{name:"e2e-凭证路由",rule:{models:["e2e-other-route-model"],credential_ids:[],credential_providers:[{source:"ai-providers",provider:"openai-compatible-route-allowed-e2e"}]},scopes:[$scope]}')" \
     >"$runtime_dir/credential-route.json"
   route="$(jq -er '.route.id' "$runtime_dir/credential-route.json")"
-  management_call PUT "$port" "/v0/management/plugins/cpa-cc-billing/keys/routes" \
+  management_call PUT "$port" "/v0/management/plugins/cpa-super-billing/keys/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg scope "$scope" --arg route "$route" '{scope:$scope,bindings:{route_ids:[$route],models:["e2e-credential-route"],credential_ids:[],credential_providers:[]}}')" \
     >/dev/null
@@ -833,7 +833,7 @@ assert_route_credential_policy() {
 
   # scheduler.pick has now observed both config-backed candidates, so the safe
   # inventory contains the opaque reference needed to test an exact binding.
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/credentials" >"$access_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/credentials" >"$access_file"
   if ! jq -e '
       first(.credentials[] | select(.source == "ai-providers" and .provider == "openai-compatible-route-allowed-e2e")) |
       .display_name == "e2e-ro…1111"
@@ -842,7 +842,7 @@ assert_route_credential_policy() {
     return 1
   fi
   allowed_ref="$(jq -er 'first(.credentials[] | select(.source == "ai-providers" and .provider == "openai-compatible-route-allowed-e2e")).ref' "$access_file")"
-  management_call PATCH "$port" "/v0/management/plugins/cpa-cc-billing/routes" \
+  management_call PATCH "$port" "/v0/management/plugins/cpa-super-billing/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg id "$route" --arg ref "$allowed_ref" '{id:$id,rule:{models:["e2e-other-route-model"],credential_ids:[$ref],credential_providers:[]}}')" \
     >/dev/null
@@ -858,7 +858,7 @@ assert_route_credential_policy() {
     return 1
   fi
 
-  management_call PATCH "$port" "/v0/management/plugins/cpa-cc-billing/routes" \
+  management_call PATCH "$port" "/v0/management/plugins/cpa-super-billing/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg id "$route" '{id:$id,rule:{models:["e2e-other-route-model"],credential_ids:[],credential_providers:[{source:"ai-providers",provider:"openai-compatible-route-missing-e2e"}]}}')" \
     >/dev/null
@@ -877,13 +877,13 @@ assert_route_credential_policy() {
     echo "没有合格凭证时未按预期返回 503：HTTP $http_status $(jq -c '.' "$response_file")" >&2
     return 1
   fi
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/events?limit=100" >"$events_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/events?limit=100" >"$events_file"
   if [[ "$(jq -er '.entries | length' "$events_file")" != "$((expected_count + 2))" ]]; then
     echo "凭证路由拦截进入了请求事件。" >&2
     return 1
   fi
 
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/plugin-logs" >"$plugin_logs_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/plugin-logs" >"$plugin_logs_file"
   if ! jq -e --arg result "$unserved_result" '
       [.entries[]
         | select(.message | startswith("route "))
@@ -901,11 +901,11 @@ assert_route_credential_policy() {
     return 1
   fi
 
-  management_call PUT "$port" "/v0/management/plugins/cpa-cc-billing/keys/routes" \
+  management_call PUT "$port" "/v0/management/plugins/cpa-super-billing/keys/routes" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg scope "$scope" '{scope:$scope,bindings:{}}')" \
     >/dev/null
-  management_call DELETE "$port" "/v0/management/plugins/cpa-cc-billing/routes?id=$route" >/dev/null
+  management_call DELETE "$port" "/v0/management/plugins/cpa-super-billing/routes?id=$route" >/dev/null
 }
 
 # Hold one SSE request open, verify a second request is refused, then verify the
@@ -924,18 +924,18 @@ assert_concurrency_limit() {
   request_events_file="$runtime_dir/concurrency-request-events.json"
   request_log="$runtime_dir/responses/concurrency-held.log"
 
-  management_call POST "$port" "/v0/management/plugins/cpa-cc-billing/keys/sync" \
+  management_call POST "$port" "/v0/management/plugins/cpa-super-billing/keys/sync" \
     -H "Content-Type: application/json" \
     --data '{"keys":["e2e-downstream-key"]}' \
     >/dev/null
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/keys" >"$access_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/keys" >"$access_file"
   scope="$(jq -er 'first(.keys[] | select(.in_config) | .scope)' "$access_file")"
-  management_call POST "$port" "/v0/management/plugins/cpa-cc-billing/keys/concurrency" \
+  management_call POST "$port" "/v0/management/plugins/cpa-super-billing/keys/concurrency" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg scope "$scope" '{scope: $scope, concurrency_limit: 1}')" \
     >/dev/null
 
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/keys" >"$access_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/keys" >"$access_file"
   if ! jq -e --arg scope "$scope" '
       first(.keys[] | select(.scope == $scope)) |
       .concurrency_limit == 1 and .current_concurrency == 0
@@ -952,7 +952,7 @@ assert_concurrency_limit() {
 
   current=0
   for ((attempt = 0; attempt < 100; attempt++)); do
-    management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/keys" >"$access_file"
+    management_call GET "$port" "/v0/management/plugins/cpa-super-billing/keys" >"$access_file"
     current="$(jq -er --arg scope "$scope" 'first(.keys[] | select(.scope == $scope)).current_concurrency' "$access_file")"
     if [[ "$current" == "1" ]]; then
       break
@@ -996,7 +996,7 @@ assert_concurrency_limit() {
   fi
   current=1
   for ((attempt = 0; attempt < 100; attempt++)); do
-    management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/keys" >"$access_file"
+    management_call GET "$port" "/v0/management/plugins/cpa-super-billing/keys" >"$access_file"
     current="$(jq -er --arg scope "$scope" 'first(.keys[] | select(.scope == $scope)).current_concurrency' "$access_file")"
     if [[ "$current" == "0" ]]; then
       break
@@ -1017,7 +1017,7 @@ assert_concurrency_limit() {
     return 1
   fi
 
-  management_call POST "$port" "/v0/management/plugins/cpa-cc-billing/keys/concurrency" \
+  management_call POST "$port" "/v0/management/plugins/cpa-super-billing/keys/concurrency" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg scope "$scope" '{scope: $scope, concurrency_limit: 0}')" \
     >/dev/null
@@ -1043,13 +1043,13 @@ assert_quota_exhausted() {
   request_events_file="$runtime_dir/quota-request-events.json"
   plugin_logs_file="$runtime_dir/quota-plugin-logs.json"
 
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/keys" >"$runtime_dir/access.json"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/keys" >"$runtime_dir/access.json"
   scope="$(jq -er 'first(.keys[] | select(.in_config) | .scope)' "$runtime_dir/access.json")"
 
   # A budget below what one request costs. Nothing has been spent when the
   # request below is admitted, which is what makes it the one that exhausts the
   # plan rather than the one that is refused.
-  management_call POST "$port" "/v0/management/plugins/cpa-cc-billing/plans" \
+  management_call POST "$port" "/v0/management/plugins/cpa-super-billing/plans" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg name "$plan_name" --arg scope "$scope" --arg dimension "$dimension" \
       '{name: $name, currency: "CNY", windows: [
@@ -1072,7 +1072,7 @@ assert_quota_exhausted() {
     "gpt-5.6-sol" "gpt-5.6-sol" "$runtime_dir/quota-spend-request-events.json" \
     "$runtime_dir/responses/quota-spend.json" false
 
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/keys" >"$runtime_dir/quota-access.json"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/keys" >"$runtime_dir/quota-access.json"
   if ! jq -e --arg scope "$scope" --arg dimension "$dimension" \
       --slurpfile events "$runtime_dir/quota-spend-request-events.json" '
       $events[0].entries[0].cost.total as $cost |
@@ -1132,23 +1132,23 @@ assert_quota_exhausted() {
     fi
   done
 
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/events?limit=100" >"$request_events_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/events?limit=100" >"$request_events_file"
   actual_count="$(jq -er '.entries | length' "$request_events_file")"
   if [[ "$actual_count" != "$expected_count" ]]; then
     echo "被额度拦截的请求进入了请求事件：${actual_count}，预期 ${expected_count}。" >&2
     return 1
   fi
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/plugin-logs" >"$plugin_logs_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/plugin-logs" >"$plugin_logs_file"
   if ! jq -e --arg plan "$plan_name" '[.entries[] | select(.level == "info" and (.message | startswith("Quota blocked: ")) and (.message | contains($plan)))] | length == 1' \
     "$plugin_logs_file" >/dev/null; then
     echo "插件日志的额度拦截记录数量不正确：$(jq -c '[.entries[] | select(.message | startswith("Quota blocked: "))]' "$plugin_logs_file")" >&2
     return 1
   fi
 
-  management_call POST "$port" "/v0/management/plugins/cpa-cc-billing/keys/reset" \
+  management_call POST "$port" "/v0/management/plugins/cpa-super-billing/keys/reset" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg scope "$scope" '{mode: "all", scopes: [$scope]}')" >/dev/null
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/keys" >"$runtime_dir/quota-reset.json"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/keys" >"$runtime_dir/quota-reset.json"
   if ! jq -e --arg scope "$scope" --arg dimension "$dimension" --slurpfile before "$runtime_dir/quota-access.json" '
       first($before[0].keys[] | select(.scope == $scope)) as $old |
       first(.keys[] | select(.scope == $scope)) |
@@ -1167,16 +1167,16 @@ assert_quota_exhausted() {
   assert_billing_entry "$port" "$((expected_count + 1))" chat chat \
     "gpt-5.6-sol" "gpt-5.6-sol" "$runtime_dir/quota-restored-request-events.json" \
     "$runtime_dir/responses/quota-restored.json" false
-  management_call POST "$port" "/v0/management/plugins/cpa-cc-billing/keys/unbind" \
+  management_call POST "$port" "/v0/management/plugins/cpa-super-billing/keys/unbind" \
     -H "Content-Type: application/json" \
     --data "$(jq -nc --arg scope "$scope" '{scope: $scope}')" \
     >/dev/null
-  management_call DELETE "$port" "/v0/management/plugins/cpa-cc-billing/plans?id=$plan" >/dev/null
+  management_call DELETE "$port" "/v0/management/plugins/cpa-super-billing/plans?id=$plan" >/dev/null
 }
 
 assert_shared_quota() {
   local port="$1" runtime_dir="$2" key body status scope
-  local api="/v0/management/plugins/cpa-cc-billing"
+  local api="/v0/management/plugins/cpa-super-billing"
   local keys_file="$runtime_dir/shared-keys.json"
   management_call POST "$port" "$api/keys/sync" -H "Content-Type: application/json" \
     --data '{"keys":["e2e-downstream-key","e2e-shared-key"]}' >/dev/null
@@ -1246,7 +1246,7 @@ assert_headless_price_admission() {
       --output "$runtime_dir/unpriced-$client.json" --write-out '%{http_code}' \
       "http://127.0.0.1:$port$endpoint")"
     if [[ "$http_status" != "503" ]] || ! jq -e '
-      .error.type == "cpa_cc_billing_error" and .error.code == "model_price_error" and
+      .error.type == "cpa_super_billing_error" and .error.code == "model_price_error" and
       .error.message == "Model e2e-chat-to-chat-nonstream has no configured price"
     ' "$runtime_dir/unpriced-$client.json" >/dev/null; then
       echo "未访问前端时的 ${client} 定价拦截失败，HTTP ${http_status}。" >&2
@@ -1265,20 +1265,20 @@ assert_unpriced_model_policy() {
   local events_file="$runtime_dir/unpriced-policy-events.json"
   local logs_file="$runtime_dir/unpriced-policy-logs.json"
   local response_file="$runtime_dir/responses/unpriced-refused.json"
-  management_call DELETE "$port" "/v0/management/plugins/cpa-cc-billing/prices?model_id=$model" >/dev/null
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/events?limit=100" >"$events_file"
+  management_call DELETE "$port" "/v0/management/plugins/cpa-super-billing/prices?model_id=$model" >/dev/null
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/events?limit=100" >"$events_file"
   count="$(jq -er '.entries | length' "$events_file")"
   body="$(request_body chat "$model" false "Reply with exactly OK.")"
 
   for enabled in true false; do
-    management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/plugin-logs" >"$logs_file"
+    management_call GET "$port" "/v0/management/plugins/cpa-super-billing/plugin-logs" >"$logs_file"
     previous_updates="$(jq '[.entries[] | select(.message == "Configuration updated: enabled")] | length' "$logs_file")"
-    management_call PATCH "$port" "/v0/management/plugins/cpa-cc-billing/config" \
+    management_call PATCH "$port" "/v0/management/plugins/cpa-super-billing/config" \
       -H "Content-Type: application/json" --data "{\"allow_unpriced_models\":$enabled}" >/dev/null
     # The host reloads configuration asynchronously; wait for the plugin to apply it.
     attempts=0
     while (( attempts < 100 )); do
-      management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/plugin-logs" >"$logs_file"
+      management_call GET "$port" "/v0/management/plugins/cpa-super-billing/plugin-logs" >"$logs_file"
       updates="$(jq '[.entries[] | select(.message == "Configuration updated: enabled")] | length' "$logs_file")"
       if (( updates > previous_updates )); then
         break
@@ -1325,9 +1325,9 @@ assert_reference_price_billing() {
   local prices_file="$runtime_dir/reference-prices.json"
   local events_file="$runtime_dir/reference-price-events.json"
   for model in "gpt-4o" "gpt-5.6-sol" "codex/gpt-5.6-sol"; do
-    management_call DELETE "$port" "/v0/management/plugins/cpa-cc-billing/prices?model_id=$model" >/dev/null
+    management_call DELETE "$port" "/v0/management/plugins/cpa-super-billing/prices?model_id=$model" >/dev/null
   done
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/events?limit=100" >"$events_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/events?limit=100" >"$events_file"
   count="$(jq -er '.entries | length' "$events_file")"
   for model in "gpt-4o" "codex/gpt-5.6-sol"; do
     requested_model="$model"
@@ -1335,7 +1335,7 @@ assert_reference_price_billing() {
       requested_model="$model(xhigh)"
     fi
     response_name="${model//\//-}"
-    management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/prices?model=$requested_model&include_custom=false" >"$prices_file"
+    management_call GET "$port" "/v0/management/plugins/cpa-super-billing/prices?model=$requested_model&include_custom=false" >"$prices_file"
     if ! jq -e 'length == 1 and .[0].source == "reference"' "$prices_file" >/dev/null; then
       echo "模型 $requested_model 未匹配到 models.dev 参考价。" >&2
       return 1
@@ -1421,7 +1421,7 @@ cc_balance() {
   local port="$1"
   local key="$2"
   curl -fsS --max-time 30 -H "Authorization: Bearer $key" \
-    "http://127.0.0.1:$port/v0/resource/plugins/cpa-cc-billing/balance" | jq -er '.total_available'
+    "http://127.0.0.1:$port/v0/resource/plugins/cpa-super-billing/balance" | jq -er '.total_available'
 }
 
 assert_cc_split() {
@@ -1433,7 +1433,7 @@ assert_cc_split() {
   local plan_name="e2e-CC-固定 key 周额度"
   local auth_index fixed_scope remainder_scope plan status reset_5h reset_7d anchor fixed_used
   local remainder_balance fixed_balance reason
-  local base="/v0/management/plugins/cpa-cc-billing"
+  local base="/v0/management/plugins/cpa-super-billing"
 
   # A second downstream key for the fixed side of the pool.
   management_call PUT "$port" "/v0/management/api-keys" -H "Content-Type: application/json" \
@@ -1551,9 +1551,9 @@ assert_management_page() {
   local page_file="$runtime_dir/ui.html" headers_file="$runtime_dir/ui-headers.txt"
   local version
   version="$(awk -F'"' '/^[[:space:]]*Version[[:space:]]*=/ {print $2; exit}' "$repo_dir/internal/plugin/types.go")"
-  management_call GET "$port" "/v0/resource/plugins/cpa-cc-billing/ui" -D "$headers_file" >"$page_file"
+  management_call GET "$port" "/v0/resource/plugins/cpa-super-billing/ui" -D "$headers_file" >"$page_file"
   if ! grep -Eiq '^content-type:[[:space:]]*text/html' "$headers_file" ||
-    ! grep -q '<title>CPA CC Billing</title>' "$page_file" ||
+    ! grep -q '<title>CPA Super Billing</title>' "$page_file" ||
     ! grep -q "v${version}" "$page_file" ||
     grep -Eq '/\*[a-z_-]+\.(css|js)\*/' "$page_file"; then
     echo "插件管理页未正确返回：$(head -c 200 "$page_file")" >&2
@@ -1583,7 +1583,7 @@ assert_v8_config_migration() {
     echo "配置文件在 v8 写入前已被改写。" >&2
     return 1
   fi
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/plugin-logs" >"$logs_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/plugin-logs" >"$logs_file"
   last_log="$(jq '[.entries[].id] | max // 0' "$logs_file")"
   management_call PATCH "$port" "/v8/management/config" -H "Content-Type: application/json" \
     --data '{"routing":{"retry":{"request-retry":0}}}' >/dev/null
@@ -1592,7 +1592,7 @@ assert_v8_config_migration() {
     echo "v8 配置写入后，配置文件未迁移为 v8 格式或缺少插件配置。" >&2
     return 1
   fi
-  management_call GET "$port" "/v8/management/config/plugins/configs/cpa-cc-billing" >"$plugin_config_file"
+  management_call GET "$port" "/v8/management/config/plugins/configs/cpa-super-billing" >"$plugin_config_file"
   if ! jq -e --arg state "$runtime_dir/state.db" '.state_file == $state and .enabled == true and .debug == true' \
     "$plugin_config_file" >/dev/null; then
     echo "v8 配置中的插件配置不正确：$(jq -c . "$plugin_config_file")" >&2
@@ -1601,8 +1601,8 @@ assert_v8_config_migration() {
   # The host reloads the rewritten file asynchronously.
   sleep 2
   management_call GET "$port" "/v0/management/plugins" >"$plugins_file"
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/plugin-logs" >"$logs_file"
-  if ! jq -e '.plugins[] | select(.id == "cpa-cc-billing" and .registered == true and .effective_enabled == true)' "$plugins_file" >/dev/null ||
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/plugin-logs" >"$logs_file"
+  if ! jq -e '.plugins[] | select(.id == "cpa-super-billing" and .registered == true and .effective_enabled == true)' "$plugins_file" >/dev/null ||
     ! jq -e '[.entries[] | select(.message | contains("Loaded billing database"))] | length == 1' "$logs_file" >/dev/null ||
     jq -e --argjson last "$last_log" '[.entries[] | select(.id > $last and .level == "error")] | length > 0' "$logs_file" >/dev/null; then
     echo "v8 配置迁移后插件状态异常：$(jq -c --argjson last "$last_log" '[.entries[] | select(.id > $last)]' "$logs_file")" >&2
@@ -1633,7 +1633,7 @@ run_target() {
     echo "CLIProxyAPI ${host_label} 缺少可执行文件：$host_binary" >&2
     return 1
   fi
-  cp "$plugin_path" "$runtime_dir/plugins/cpa-cc-billing.$plugin_extension"
+  cp "$plugin_path" "$runtime_dir/plugins/cpa-super-billing.$plugin_extension"
 
   # The models and providers live in scripts/e2e_config.yaml; only runtime paths,
   # ports and the dummy credential are filled in here.
@@ -1664,7 +1664,7 @@ run_target() {
 
   plugins_file="$runtime_dir/plugins.json"
   management_call GET "$port" "/v0/management/plugins" >"$plugins_file"
-  if ! jq -e '.plugins[] | select(.id == "cpa-cc-billing" and .registered == true and .effective_enabled == true)' "$plugins_file" >/dev/null; then
+  if ! jq -e '.plugins[] | select(.id == "cpa-super-billing" and .registered == true and .effective_enabled == true)' "$plugins_file" >/dev/null; then
     echo "插件未在 CLIProxyAPI ${host_label} 中注册。" >&2
     tail -n 80 "$runtime_dir/host.log" >&2 || true
     return 1
@@ -1673,7 +1673,7 @@ run_target() {
   assert_management_page "$port" "$runtime_dir"
   log_step "插件管理页已返回"
   management_call GET "$port" "/v0/management/quota/providers" >"$runtime_dir/quota-providers.json"
-  if ! jq -e '.providers[] | select(.plugin_id == "cpa-cc-billing" and .supports_reset == true and (.supported_providers | index("codex")))' "$runtime_dir/quota-providers.json" >/dev/null; then
+  if ! jq -e '.providers[] | select(.plugin_id == "cpa-super-billing" and .supports_reset == true and (.supported_providers | index("codex")))' "$runtime_dir/quota-providers.json" >/dev/null; then
     echo "插件标准额度能力未注册。" >&2
     return 1
   fi
@@ -1684,7 +1684,7 @@ run_target() {
   jq -er '.data[].id' "$runtime_dir/models.json" >"$runtime_dir/model-ids.txt"
   while IFS= read -r model_id; do
     jq -n --arg model "$model_id" '{model_id:$model,input_per_1m:1,output_per_1m:2,cache_read_per_1m:0.1,cache_write_per_1m:1.25}' >"$runtime_dir/model-price.json"
-    management_call PUT "$port" "/v0/management/plugins/cpa-cc-billing/prices" \
+    management_call PUT "$port" "/v0/management/plugins/cpa-super-billing/prices" \
       -H "Content-Type: application/json" --data-binary "@$runtime_dir/model-price.json" >"$runtime_dir/price.json"
   done <"$runtime_dir/model-ids.txt"
   log_step "所有测试模型的自定义价已配置"
@@ -1753,7 +1753,7 @@ run_target() {
 
   request_events_file="$runtime_dir/matrix-billing.json"
   matrix_logs_ok=1
-  if ! management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/events?limit=100" >"$request_events_file"; then
+  if ! management_call GET "$port" "/v0/management/plugins/cpa-super-billing/events?limit=100" >"$request_events_file"; then
     matrix_logs_ok=0
   fi
 
@@ -1910,7 +1910,7 @@ run_target() {
   done
 
   request_events_file="$runtime_dir/request-events.json"
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/events?limit=100" >"$request_events_file"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/events?limit=100" >"$request_events_file"
   # Four client protocols against four upstream protocols in both modes, plus
   # the three routing cases.
   expected_requests=35
@@ -1922,11 +1922,11 @@ run_target() {
   account_access_file="$runtime_dir/account-access.json"
   account_prices_file="$runtime_dir/account-prices.json"
   account_events_file="$runtime_dir/account-events.json"
-  account_call "$port" "/v0/resource/plugins/cpa-cc-billing/profile" >"$account_access_file"
-  account_call "$port" "/v0/resource/plugins/cpa-cc-billing/subscription" >"$runtime_dir/account-subscription.json"
-  account_call "$port" "/v0/resource/plugins/cpa-cc-billing/routing" >"$runtime_dir/account-routing.json"
-  account_call "$port" "/v0/resource/plugins/cpa-cc-billing/prices?model=gpt-5.6-sol" >"$account_prices_file"
-  account_call "$port" "/v0/resource/plugins/cpa-cc-billing/events?limit=100" >"$account_events_file"
+  account_call "$port" "/v0/resource/plugins/cpa-super-billing/profile" >"$account_access_file"
+  account_call "$port" "/v0/resource/plugins/cpa-super-billing/subscription" >"$runtime_dir/account-subscription.json"
+  account_call "$port" "/v0/resource/plugins/cpa-super-billing/routing" >"$runtime_dir/account-routing.json"
+  account_call "$port" "/v0/resource/plugins/cpa-super-billing/prices?model=gpt-5.6-sol" >"$account_prices_file"
+  account_call "$port" "/v0/resource/plugins/cpa-super-billing/events?limit=100" >"$account_events_file"
   if ! jq -e '
       .tracked == true and
       has("identity") and (has("subscription") | not) and (has("credentials") | not) and
@@ -1946,7 +1946,7 @@ run_target() {
     return 1
   fi
   log_step "API Key 自助查询已验证：仅返回当前 Key 的 35 条请求事件"
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/analysis" >"$runtime_dir/analysis.json"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/analysis" >"$runtime_dir/analysis.json"
   if ! jq -e '
       .usage_distribution.models as $models |
       [$models[] | select((.key | startswith("e2e-")) or (.key | startswith("codex/e2e-")))] as $matrix |
@@ -1982,7 +1982,7 @@ run_target() {
   log_step "共享额度：两个 Key 累计消费、统一拦截、单 Key 重置整个池"
   assert_shared_quota "$port" "$runtime_dir"
 
-  management_call GET "$port" "/v0/management/plugins/cpa-cc-billing/plugin-logs" >"$runtime_dir/plugin-logs.json"
+  management_call GET "$port" "/v0/management/plugins/cpa-super-billing/plugin-logs" >"$runtime_dir/plugin-logs.json"
   if ! jq -e '[.entries[] | select(.level == "info" and (.message | contains("Loaded billing database")))] | length == 1' \
     "$runtime_dir/plugin-logs.json" >/dev/null; then
     echo "插件日志缺少启动记录：$(jq -c '.entries' "$runtime_dir/plugin-logs.json")" >&2

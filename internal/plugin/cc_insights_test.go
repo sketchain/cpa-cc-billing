@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
-	"cpa-cc-billing/internal/ccbilling"
+	"cpa-super-billing/internal/billing"
+	"cpa-super-billing/internal/ccbilling"
 )
 
 func ccKeyUsage(t *testing.T, app *App) ccbilling.KeyUsage {

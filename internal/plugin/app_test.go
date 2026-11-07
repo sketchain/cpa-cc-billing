@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func TestRegisterDeclaresExpectedCapabilities(t *testing.T) {

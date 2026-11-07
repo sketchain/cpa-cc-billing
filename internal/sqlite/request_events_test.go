@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 var eventStart = time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)

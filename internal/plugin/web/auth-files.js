@@ -125,7 +125,7 @@ function authUI(account) {
   };
 }
 
-const AUTH_QUOTA_CACHE_PREFIX = "cpa-cc-billing.auth-quotas.v7.";
+const AUTH_QUOTA_CACHE_PREFIX = "cpa-super-billing.auth-quotas.v7.";
 
 function resetAuthQuotaMemory(account) {
   const role = account ? "account" : "admin";

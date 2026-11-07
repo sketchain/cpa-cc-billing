@@ -1,8 +1,8 @@
 <div align="center">
-  <h1>CPA CC Billing</h1>
+  <h1>CPA Super Billing</h1>
   <p><strong>A <a href="https://github.com/router-for-me/CLIProxyAPI">CLIProxyAPI</a> plugin that splits one Claude subscription's quota between downstream API keys.</strong></p>
   <p>
-    <a href="https://github.com/sketchain/cpa-cc-billing/releases/latest"><img src="https://img.shields.io/github/v/release/sketchain/cpa-cc-billing?label=release" alt="Latest release"></a>
+    <a href="https://github.com/sketchain/cpa-super-billing/releases/latest"><img src="https://img.shields.io/github/v/release/sketchain/cpa-super-billing?label=release" alt="Latest release"></a>
     <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platforms: Windows, macOS, and Linux">
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
   </p>
@@ -11,7 +11,7 @@
 
 A fork of [cpa-key-billing](https://github.com/haowang02/cpa-plugin-key-billing). All of its billing, quota, concurrency and routing features remain; this fork adds the CC split.
 
-<img src="images/example.png" alt="CPA CC Billing dashboard" width="100%" />
+<img src="images/example.png" alt="CPA Super Billing dashboard" width="100%" />
 
 ## Features
 
@@ -150,31 +150,50 @@ For Claude accounts in a CC pool, the auth files page (with **Quota estimate** o
 ### Balance endpoint for new-api
 
 ```text
-GET /v0/resource/plugins/cpa-cc-billing/balance
+GET /v0/resource/plugins/cpa-super-billing/balance
 Authorization: Bearer <downstream API key>
 ```
 
 It returns `{"object":"credit_summary","total_available": <USD>}` for the week only: weekly amount minus usage for a fixed key, `Σ R_week − P_week` for a remainder key (capped by its own cap). Zero or less is reported as `1` on purpose, because new-api disables a channel whose balance is zero or less; the CC split page shows the actual value next to the reported one. A remainder key's balance is the whole pool's shared balance: several remainder keys of one pool each report the same amount, which must not be added up. Keys outside every pool get 404, unknown keys 401.
 
-In new-api, create an **Advanced Custom** channel with the CPA address as Base URL and the downstream key as its key, and add a balance route whose `incoming_path` is `/v1/dashboard/billing/credit_grants` (the path new-api queries for balances) and whose `upstream_path` is `/v0/resource/plugins/cpa-cc-billing/balance`, with no converter and the default `Authorization: Bearer` authentication:
+In new-api, create an **Advanced Custom** channel with the CPA address as Base URL and the downstream key as its key, and add a balance route whose `incoming_path` is `/v1/dashboard/billing/credit_grants` (the path new-api queries for balances) and whose `upstream_path` is `/v0/resource/plugins/cpa-super-billing/balance`, with no converter and the default `Authorization: Bearer` authentication:
 
 ```json
 {
   "advanced_routes": [
-    { "incoming_path": "/v1/dashboard/billing/credit_grants", "upstream_path": "/v0/resource/plugins/cpa-cc-billing/balance", "converter": "none" }
+    { "incoming_path": "/v1/dashboard/billing/credit_grants", "upstream_path": "/v0/resource/plugins/cpa-super-billing/balance", "converter": "none" }
   ]
 }
 ```
 
 ### Price list import
 
-Use **Import JSON** on the model pricing card, or `POST /v0/management/plugins/cpa-cc-billing/prices/import`. The file is an array or `{"models": [...]}` of entries with `name`, `aliases`, `input`, `output`, `cache_read` and `cache_write` in USD per million tokens. The name and every alias become custom prices; other fields, such as tier notes, are ignored.
+Use **Import JSON** on the model pricing card, or `POST /v0/management/plugins/cpa-super-billing/prices/import`. The file is an array or `{"models": [...]}` of entries with `name`, `aliases`, `input`, `output`, `cache_read` and `cache_write` in USD per million tokens. The name and every alias become custom prices; other fields, such as tier notes, are ignored.
+
+## Migrating from cpa-cc-billing
+
+From v0.3.0 the plugin is named `cpa-super-billing`. CLIProxyAPI identifies a plugin by its library file name, so the rename installs a new plugin: its configuration, store source and balance path have to be changed once by hand. The database is adopted automatically.
+
+1. Stop CLIProxyAPI (with Docker Compose, stop the `cli-proxy-api` service).
+2. Back up `plugins/cpa-cc-billing-state-v1.db` with its `-wal` and `-shm` files if present.
+3. Delete every `cpa-cc-billing*.so` (`.dll` on Windows, `.dylib` on macOS) from the `plugins` directory and its per-platform subdirectories, then add the new `cpa-super-billing*.so`.
+4. In `config.yaml`, rename the whole `plugins.configs.cpa-cc-billing` entry to `plugins.configs.cpa-super-billing`, keeping its settings, including any `store.version` or `store.release-tag` pin; a pinned version must name the new plugin's version.
+5. If `plugins.store-sources` lists the old repository's `registry.json`, change it to `https://raw.githubusercontent.com/sketchain/cpa-super-billing/main/registry.json`.
+6. In each new-api channel's balance route, change `upstream_path` from `/v0/resource/plugins/cpa-cc-billing/balance` to `/v0/resource/plugins/cpa-super-billing/balance`. The management page moves to `/v0/resource/plugins/cpa-super-billing/ui`.
+7. Start CLIProxyAPI.
+
+> [!WARNING]
+> Never leave both libraries in the `plugins` directory. CLIProxyAPI loads them as two plugins, so every request would be intercepted and billed twice.
+
+Database: with `state_file` unset, the plugin uses `plugins/cpa-super-billing-state-v1.db`. When that file does not exist yet but `plugins/cpa-cc-billing-state-v1.db` does, the plugin copies the old database in full with SQLite's `VACUUM INTO`, as it does for the automatic backup before migrations, checks the copy, opens it, and reports the copy in the plugin log and on the **Subscription split** page. The old database is left untouched; delete it (with its `-wal` and `-shm` files) once everything checks out, and the notice disappears. If the copy fails, the plugin does not start and the log says why; you can also point `state_file` at the old file to keep using it. An explicit `state_file` is opened as configured, without a copy.
+
+Credentials, theme, language and view preferences saved in the browser are copied from the old name the first time the new page opens.
 
 ## Migrating from cpa-key-billing
 
 1. Stop CLIProxyAPI and back up `plugins/cpa-key-billing-state-v1.db` with its `-wal` and `-shm` files if present.
-2. Copy it to `plugins/cpa-cc-billing-state-v1.db` (and the `-wal`/`-shm` files to the same new prefix).
-3. Remove the old plugin library and its `plugins.configs.cpa-key-billing` entry (running both would refuse and bill twice), then install this plugin with a `plugins.configs.cpa-cc-billing` entry.
+2. Copy it to `plugins/cpa-super-billing-state-v1.db` (and the `-wal`/`-shm` files to the same new prefix).
+3. Remove the old plugin library and its `plugins.configs.cpa-key-billing` entry (running both would refuse and bill twice), then install this plugin with a `plugins.configs.cpa-super-billing` entry.
 4. Start CLIProxyAPI. Keys, plans, routes, prices and request history are kept; the CC tables (`cc_meta`, `cc_segments`, `cc_streams`, `cc_k_buckets`) are created automatically. The billing schema version is unchanged, so the original plugin can still open the file.
 5. On the **CC split** page, choose account tiers, create a pool and assign keys. Segments are built from the retained request history right away.
 
@@ -190,23 +209,23 @@ Run the installer from your CLIProxyAPI directory.
 On macOS or Linux:
 
 ```sh
-curl -LsSf https://raw.githubusercontent.com/sketchain/cpa-cc-billing/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/sketchain/cpa-super-billing/main/install.sh | sh
 ```
 
 On Windows, stop CLIProxyAPI first, then run this in PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/sketchain/cpa-cc-billing/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/sketchain/cpa-super-billing/main/install.ps1 | iex
 ```
 
 The installer places the plugin in `plugins/` under the current directory. Restart CLIProxyAPI after installing or upgrading.
 
-For manual installation, download the archive for your platform from [Releases](https://github.com/sketchain/cpa-cc-billing/releases/latest), then extract the library into CLIProxyAPI’s `plugins/` directory:
+For manual installation, download the archive for your platform from [Releases](https://github.com/sketchain/cpa-super-billing/releases/latest), then extract the library into CLIProxyAPI’s `plugins/` directory:
 
 ```text
-plugins/cpa-cc-billing.so       # Linux
-plugins/cpa-cc-billing.dylib    # macOS
-plugins/cpa-cc-billing.dll      # Windows
+plugins/cpa-super-billing.so       # Linux
+plugins/cpa-super-billing.dylib    # macOS
+plugins/cpa-super-billing.dll      # Windows
 ```
 
 ## Configuration
@@ -218,7 +237,7 @@ plugins:
   enabled: true
   dir: "plugins"
   configs:
-    cpa-cc-billing:
+    cpa-super-billing:
       enabled: true
       priority: 100 # Plugin scheduling priority; higher values take precedence
       debug: false # Include routing and reference-price matching in debug logs
@@ -228,7 +247,7 @@ plugins:
       mask_api_key_view_emails: false # Mask email addresses in API key account views
       allow_api_key_quota_reset: false # Allow API key users to reset accessible Codex and Claude auth file quotas using upstream resets
       request_event_retention_days: 365 # Retention in days for request events and their associated errors, a positive integer
-      state_file: "plugins/cpa-cc-billing-state-v1.db"
+      state_file: "plugins/cpa-super-billing-state-v1.db"
       routing:
         strategy: "round-robin" # round-robin, weighted-round-robin, fill-first
         session-affinity: false # Reuse an available upstream credential for the same session
@@ -247,14 +266,14 @@ For initial selections or invalid session bindings, the plugin uses the highest 
 > - Databases of cpa-key-billing v1.0.0 or later can be used directly; see [Migrating from cpa-key-billing](#migrating-from-cpa-key-billing).
 > - JSON and SQLite files from cpa-key-billing v0.8.4 or earlier cannot be migrated. Point `state_file` to a new file instead.
 
-Restart CLIProxyAPI and open **CPA CC Billing** in the management panel. Review model pricing, create subscription plans, and bind the API keys whose quotas you want to enforce.
+Restart CLIProxyAPI and open **CPA Super Billing** in the management panel. Review model pricing, create subscription plans, and bind the API keys whose quotas you want to enforce.
 
 ## Upgrading and database recovery
 
 ### Before upgrading
 
 1. Stop CLIProxyAPI (with Docker Compose, stop the `cli-proxy-api` service).
-2. Back up the database `state_file` points to (by default `plugins/cpa-cc-billing-state-v1.db`) together with its `-wal` and `-shm` files if present. Copy all three after stopping the service: the `.db` file alone can miss the most recent writes.
+2. Back up the database `state_file` points to (by default `plugins/cpa-super-billing-state-v1.db`) together with its `-wal` and `-shm` files if present. Copy all three after stopping the service: the `.db` file alone can miss the most recent writes.
 3. Replace the plugin and start CLIProxyAPI.
 
 To return to an older plugin version, first restore the backup taken before upgrading: older versions cannot open a database a newer version has migrated.
@@ -264,7 +283,7 @@ To return to an older plugin version, first restore the backup taken before upgr
 When the plugin opens a database whose structure needs upgrading (the billing tables' `PRAGMA user_version` or the CC tables' `cc_meta` `schema_version`), it first copies the whole database, including what its write-ahead log holds, into the same directory with SQLite's `VACUUM INTO`, checks that the copy opens intact, and only then migrates:
 
 ```text
-plugins/cpa-cc-billing-state-v1.db.bak-u24-to-u25-cc4-20261107T120000
+plugins/cpa-super-billing-state-v1.db.bak-u24-to-u25-cc4-20261107T120000
 ```
 
 The name carries the old and new billing versions, the old and new CC versions (one number when unchanged) and the backup time in UTC. Backups have mode `600`; only the newest three are kept and older ones are removed. No backup is taken when nothing needs migrating. The plugin log records the path of each backup.
@@ -280,7 +299,7 @@ If registration fails with `malformed database schema`, `database disk image is 
 3. Otherwise salvage the damaged file with sqlite3 and put the recovered file in its place (again deleting the old `-wal` and `-shm`):
 
    ```sh
-   sqlite3 plugins/cpa-cc-billing-state-v1.db ".recover" | sqlite3 plugins/cpa-cc-billing-state-v1.db.recovered
+   sqlite3 plugins/cpa-super-billing-state-v1.db ".recover" | sqlite3 plugins/cpa-super-billing-state-v1.db.recovered
    ```
 
 4. After starting, open the **CC split** page and use **Rebuild from history** to restore `cc_segments` and the other data derived from request history.
@@ -290,13 +309,13 @@ If registration fails with `malformed database schema`, `database disk image is 
 Administrators can open the plugin from the management panel or visit it directly:
 
 ```text
-http(s)://<CLIProxyAPI address>/v0/resource/plugins/cpa-cc-billing/ui
+http(s)://<CLIProxyAPI address>/v0/resource/plugins/cpa-super-billing/ui
 ```
 
 API key holders can use their own key to view their subscription and usage:
 
 ```text
-http(s)://<CLIProxyAPI address>/v0/resource/plugins/cpa-cc-billing/ui#account
+http(s)://<CLIProxyAPI address>/v0/resource/plugins/cpa-super-billing/ui#account
 ```
 
 The **Page display** card on the Settings page is stored in the database and starts from its defaults after an upgrade:

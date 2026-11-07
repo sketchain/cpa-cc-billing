@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 type aiProviderView struct {

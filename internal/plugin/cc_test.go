@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
-	"cpa-cc-billing/internal/ccbilling"
+	"cpa-super-billing/internal/billing"
+	"cpa-super-billing/internal/ccbilling"
 )
 
 const (
@@ -1006,7 +1006,7 @@ func TestCCDatabasesAcrossTheSharedQuotaSchema(t *testing.T) {
 	})
 
 	t.Run("new database", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "cpa-cc-billing-state-v1.db")
+		path := filepath.Join(t.TempDir(), "cpa-super-billing-state-v1.db")
 		app := openStateFile(t, path, clock)
 		callOK(t, app, http.MethodGet, routeCC, nil, nil, http.StatusOK, nil)
 		app.Shutdown()

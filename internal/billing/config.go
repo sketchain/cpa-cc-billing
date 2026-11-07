@@ -10,7 +10,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const DefaultStateFile = "plugins/cpa-cc-billing-state-v1.db"
+const DefaultStateFile = "plugins/cpa-super-billing-state-v1.db"
+
+// LegacyStateFile is the default database of the plugin's former name,
+// cpa-cc-billing. A configuration that leaves state_file unset adopts a copy
+// of it when DefaultStateFile does not exist yet.
+const LegacyStateFile = "plugins/cpa-cc-billing-state-v1.db"
 
 const maxRetentionDays = RetentionDays((1<<63 - 1) / (24 * time.Hour))
 
@@ -25,6 +30,10 @@ type Config struct {
 	MaskAPIKeyViewEmails      bool          `yaml:"mask_api_key_view_emails"`
 	AllowAPIKeyQuotaReset     bool          `yaml:"allow_api_key_quota_reset"`
 	Routing                   RoutingConfig `yaml:"routing"`
+
+	// stateFileDefaulted reports that the configuration left state_file
+	// unset, so the database is the default one.
+	stateFileDefaulted bool
 }
 
 type RetentionDays int
@@ -59,6 +68,9 @@ func DefaultConfig() Config {
 
 func DecodeConfig(raw []byte) (Config, error) {
 	cfg := DefaultConfig()
+	// Left unset, state_file means the default database, which may adopt the
+	// database of the plugin's former name.
+	cfg.StateFile = ""
 	if len(bytes.TrimSpace(raw)) > 0 {
 		document := struct {
 			Config `yaml:",inline"`
@@ -76,6 +88,7 @@ func DecodeConfig(raw []byte) (Config, error) {
 		}
 		cfg = document.Config
 	}
+	cfg.stateFileDefaulted = strings.TrimSpace(cfg.StateFile) == ""
 	return cfg.normalized()
 }
 

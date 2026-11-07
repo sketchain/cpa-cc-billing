@@ -4,7 +4,7 @@ import (
 	"math"
 	"time"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 // Sources of an account's totals and k.

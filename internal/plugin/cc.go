@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
-	"cpa-cc-billing/internal/ccbilling"
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/billing"
+	"cpa-super-billing/internal/ccbilling"
+	"cpa-super-billing/internal/messages"
 )
 
 // This file wires the CC split (internal/ccbilling) into the plugin. Upstream
@@ -349,8 +349,12 @@ func (a *App) ccView(_ ManagementRequest) ManagementResponse {
 			prices, priceWarning = map[string]billing.PriceMultiplier{}, err.Error()
 		}
 	}
-	return JSONResponse(http.StatusOK, map[string]any{"cc": view, "credentials": credentials, "key_options": keys, "credential_warning": warning,
-		"price_multipliers": prices, "price_warning": priceWarning})
+	body := map[string]any{"cc": view, "credentials": credentials, "key_options": keys, "credential_warning": warning,
+		"price_multipliers": prices, "price_warning": priceWarning}
+	if legacy, ok := a.store.LegacyDatabaseNotice(); ok {
+		body["legacy_database"] = legacy
+	}
+	return JSONResponse(http.StatusOK, body)
 }
 
 // ccCalibrationError maps a calibration error to its response.

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 
 	_ "github.com/mattn/go-sqlite3"
 )

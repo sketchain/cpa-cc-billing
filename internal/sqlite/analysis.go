@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func (d *DB) Analysis(query billing.RequestEventQuery, rate billing.ExchangeRate, since time.Time) (billing.AnalysisView, error) {

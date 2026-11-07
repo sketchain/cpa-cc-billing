@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 func TestAuthQuotaTransport(t *testing.T) {

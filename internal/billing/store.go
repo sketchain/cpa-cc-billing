@@ -2,8 +2,10 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -43,10 +45,16 @@ type Store struct {
 
 	open                    func(string) (Repository, error)
 	downloadReferencePrices func(context.Context) ([]byte, error)
+	// copyDatabase copies a database file to a new path, leaving the source
+	// untouched; nil disables adopting the former plugin's database.
+	copyDatabase func(source, target string) error
+	// legacyCopiedAt is when this process copied the former plugin's
+	// database to the default path.
+	legacyCopiedAt time.Time
 
 	now func() time.Time
 
-	// usageObserver is the cpa-cc-billing hook for recorded usage.
+	// usageObserver is the cpa-super-billing hook for recorded usage.
 	usageObserver UsageObserver
 	// usageSeq numbers recorded usage under mu, so readers can tell which
 	// usage a read already includes.
@@ -115,6 +123,14 @@ func (s *Store) Configure(cfg Config) error {
 		return nil
 	}
 
+	copiedFrom := ""
+	if normalized.stateFileDefaulted {
+		var errAdopt error
+		if copiedFrom, errAdopt = s.adoptLegacyDatabase(path); errAdopt != nil {
+			return errAdopt
+		}
+	}
+
 	// Load the incoming database before replacing the active one.
 	repo, errOpen := s.open(path)
 	if errOpen != nil {
@@ -150,9 +166,103 @@ func (s *Store) Configure(cfg Config) error {
 			s.AddPluginLog(notice.Level, "%s", notice.Message)
 		}
 	}
+	if copiedFrom != "" {
+		s.AddPluginLog(PluginLogInfo, "Copied the cpa-cc-billing database %s to %s and opened the copy. "+
+			"The old database was left untouched; delete it once everything checks out", copiedFrom, path)
+	}
 	s.AddPluginLog(PluginLogInfo, "Loaded billing database: %s, %d API keys, %d subscription plans, %d request events, %s",
 		path, len(snapshot.State.Keys), len(snapshot.State.Plans), snapshot.RequestEventCount, normalized.describe())
 	return nil
+}
+
+// SetDatabaseCopier enables adopting the database of the plugin's former name:
+// copy copies a database to a new path and leaves the source untouched.
+func (s *Store) SetDatabaseCopier(copy func(source, target string) error) {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	s.copyDatabase = copy
+}
+
+// legacyDatabasePath is the absolute path of LegacyStateFile.
+func legacyDatabasePath() (string, error) {
+	return filepath.Abs(LegacyStateFile)
+}
+
+func fileExists(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+// adoptLegacyDatabase runs under cfgMu before the default database at path
+// opens. When path does not exist but the former plugin's default database
+// does, it copies that database to path, so an upgrade keeps its keys,
+// plans, routes, prices, history and CC data. The old file is left as it is.
+// It returns the old database's path when it copied it.
+func (s *Store) adoptLegacyDatabase(path string) (string, error) {
+	if s.copyDatabase == nil {
+		return "", nil
+	}
+	legacy, err := legacyDatabasePath()
+	if err != nil || legacy == path {
+		return "", nil
+	}
+	exists, err := fileExists(path)
+	if err != nil {
+		return "", fmt.Errorf("Check billing database %s: %w", path, err)
+	}
+	if exists {
+		return "", nil
+	}
+	found, err := fileExists(legacy)
+	if err != nil {
+		return "", fmt.Errorf("Check the cpa-cc-billing database %s: %w", legacy, err)
+	}
+	if !found {
+		return "", nil
+	}
+	if err := s.copyDatabase(legacy, path); err != nil {
+		return "", fmt.Errorf("%w; the cpa-cc-billing database was not copied and was left as it is. "+
+			"Make sure the directory is writable and has room for a full copy and restart CLIProxyAPI, "+
+			"or set state_file to %s to keep using that file", err, legacy)
+	}
+	s.legacyCopiedAt = s.Now()
+	return legacy, nil
+}
+
+// LegacyDatabase describes the former plugin's default database while it is
+// still beside the active default database.
+type LegacyDatabase struct {
+	// Path is the old database file.
+	Path string `json:"path"`
+	// Active is the database the plugin uses.
+	Active string `json:"active"`
+	// CopiedAt is when the plugin copied Path to Active, if this process did.
+	CopiedAt time.Time `json:"copied_at,omitzero"`
+}
+
+// LegacyDatabaseNotice reports the former plugin's database when the plugin
+// uses the default database and the old file still exists.
+func (s *Store) LegacyDatabaseNotice() (LegacyDatabase, bool) {
+	s.cfgMu.Lock()
+	copiedAt := s.legacyCopiedAt
+	s.cfgMu.Unlock()
+	s.mu.RLock()
+	defaulted, active := s.cfg.stateFileDefaulted, s.path
+	s.mu.RUnlock()
+	legacy, err := legacyDatabasePath()
+	if !defaulted || active == "" || err != nil || legacy == active {
+		return LegacyDatabase{}, false
+	}
+	if found, _ := fileExists(legacy); !found {
+		return LegacyDatabase{}, false
+	}
+	return LegacyDatabase{Path: legacy, Active: active, CopiedAt: copiedAt}, true
 }
 
 // Close releases the database when the host shuts down the plugin.

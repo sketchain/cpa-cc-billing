@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 var codexQuotaGroup = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,120}$`)

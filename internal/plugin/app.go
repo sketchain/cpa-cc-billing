@@ -9,9 +9,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"cpa-cc-billing/internal/billing"
-	"cpa-cc-billing/internal/ccbilling"
-	"cpa-cc-billing/internal/sqlite"
+	"cpa-super-billing/internal/billing"
+	"cpa-super-billing/internal/ccbilling"
+	"cpa-super-billing/internal/sqlite"
 )
 
 type App struct {
@@ -51,6 +51,7 @@ func newApp(store *billing.Store) *App {
 	}
 	if app.store == nil {
 		app.store = billing.NewStore(openRepository, app.downloadReferencePrices)
+		app.store.SetDatabaseCopier(sqlite.CopyDatabase)
 	}
 	app.cc = newCCManager(app)
 	return app

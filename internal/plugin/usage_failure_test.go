@@ -3,7 +3,7 @@ package plugin
 import (
 	"testing"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func TestUsageFailureDetails(t *testing.T) {

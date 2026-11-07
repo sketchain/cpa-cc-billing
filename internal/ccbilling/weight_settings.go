@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 // WeightItem is one model under test: models whose subscription quota use

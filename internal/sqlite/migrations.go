@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func migrateSchema(tx *sql.Tx, version int, storedHeaders StoredQuotaHeaders) error {

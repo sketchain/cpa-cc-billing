@@ -1,8 +1,8 @@
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$repository = "sketchain/cpa-cc-billing"
-$pluginName = "cpa-cc-billing"
+$repository = "sketchain/cpa-super-billing"
+$pluginName = "cpa-super-billing"
 $pluginFile = "$pluginName.dll"
 $pluginDir = Join-Path (Get-Location).Path "plugins"
 $tempDir = $null

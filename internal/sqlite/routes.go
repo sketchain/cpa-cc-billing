@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func replaceRoutes(tx *sql.Tx, state *billing.State) error {

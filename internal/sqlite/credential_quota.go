@@ -8,7 +8,7 @@ import (
 	"slices"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func insertQuotaReport(tx *sql.Tx, eventID int64, authIndex string, at time.Time, report billing.QuotaReport) error {

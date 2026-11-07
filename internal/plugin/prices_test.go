@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func TestDownloadErrorsPreserveCauseWithoutURLSecrets(t *testing.T) {
@@ -59,7 +59,7 @@ func TestPriceAdmissionAndDeleteWithoutInventory(t *testing.T) {
 		if err := json.Unmarshal(result.ResponseBody, &payload); err != nil {
 			t.Fatal(err)
 		}
-		if !result.Terminate || result.StatusCode != 503 || payload.Error.Type != "cpa_cc_billing_error" || payload.Error.Code != "model_price_error" || payload.Error.Message != "Model unpriced-dummy has no configured price" {
+		if !result.Terminate || result.StatusCode != 503 || payload.Error.Type != "cpa_super_billing_error" || payload.Error.Code != "model_price_error" || payload.Error.Message != "Model unpriced-dummy has no configured price" {
 			t.Fatal(format, result, payload)
 		}
 	}

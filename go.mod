@@ -1,4 +1,4 @@
-module cpa-cc-billing
+module cpa-super-billing
 
 go 1.24
 

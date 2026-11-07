@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 const maxReferencePriceResponseBytes = 128 << 20

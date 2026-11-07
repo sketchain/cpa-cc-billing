@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-const unpricedModel = "cpa-cc-billing-test-unpriced-model"
+const unpricedModel = "cpa-super-billing-test-unpriced-model"
 
 func TestReferencePricesCarriesSingleLongContextTier(t *testing.T) {
 	rule, known := MatchReferencePrice("gpt-5.6-sol", fixtureReferencePrices(t))

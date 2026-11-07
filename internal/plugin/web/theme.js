@@ -3,7 +3,7 @@
 /* Apply the host or stored theme before painting the body. */
 (function () {
   const STORE_KEY = "cli-proxy-theme";
-  const PLUGIN_STORE_KEY = "cpa-cc-billing:theme";
+  const PLUGIN_STORE_KEY = "cpa-super-billing:theme";
 
   function parentDocument() {
     if (window.parent === window) return null;

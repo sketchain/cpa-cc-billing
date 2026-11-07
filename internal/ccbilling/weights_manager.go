@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 // Estimate bases.

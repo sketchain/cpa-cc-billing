@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func appendRequestEvent(tx *sql.Tx, entry billing.RequestEvent) (int64, error) {

@@ -1,8 +1,8 @@
 <div align="center">
-  <h1>CPA CC Billing</h1>
+  <h1>CPA Super Billing</h1>
   <p><strong>把一个 Claude 订阅账号按 CC 额度分给多个下游 API Key 的 <a href="https://github.com/router-for-me/CLIProxyAPI">CLIProxyAPI</a> 插件。</strong></p>
   <p>
-    <a href="https://github.com/sketchain/cpa-cc-billing/releases/latest"><img src="https://img.shields.io/github/v/release/sketchain/cpa-cc-billing?label=release" alt="Latest release"></a>
+    <a href="https://github.com/sketchain/cpa-super-billing/releases/latest"><img src="https://img.shields.io/github/v/release/sketchain/cpa-super-billing?label=release" alt="Latest release"></a>
     <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platforms: Windows, macOS, and Linux">
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
   </p>
@@ -11,7 +11,7 @@
 
 基于 [cpa-key-billing](https://github.com/haowang02/cpa-plugin-key-billing) 修改。原插件的计费、订阅额度、并发、路由功能全部保留，在此基础上新增「CC 分账」。
 
-<img src="images/example.png" alt="CPA CC Billing example" width="100%" />
+<img src="images/example.png" alt="CPA Super Billing example" width="100%" />
 
 ## 功能特性
 
@@ -180,7 +180,7 @@ Anthropic 响应头 `anthropic-ratelimit-unified-5h-utilization` / `7d-utilizati
 ### 给 new-api 用的余额接口
 
 ```text
-GET /v0/resource/plugins/cpa-cc-billing/balance
+GET /v0/resource/plugins/cpa-super-billing/balance
 Authorization: Bearer <下游 API Key>
 ```
 
@@ -189,12 +189,12 @@ Authorization: Bearer <下游 API Key>
 new-api 配置（渠道类型选「高级自定义」）：
 
 1. 渠道的 Base URL 填 CPA 地址，例如 `https://cpa.example.com`，密钥填下游 API Key。
-2. 在高级路由（`advanced_routes`）里加一条余额路由：`incoming_path` 为 `/v1/dashboard/billing/credit_grants`（new-api 固定使用这个路径查询余额），`upstream_path` 为 `/v0/resource/plugins/cpa-cc-billing/balance`，转换器选「无」，鉴权保持默认（`Authorization: Bearer <渠道密钥>`）。
+2. 在高级路由（`advanced_routes`）里加一条余额路由：`incoming_path` 为 `/v1/dashboard/billing/credit_grants`（new-api 固定使用这个路径查询余额），`upstream_path` 为 `/v0/resource/plugins/cpa-super-billing/balance`，转换器选「无」，鉴权保持默认（`Authorization: Bearer <渠道密钥>`）。
 
    ```json
    {
      "advanced_routes": [
-       { "incoming_path": "/v1/dashboard/billing/credit_grants", "upstream_path": "/v0/resource/plugins/cpa-cc-billing/balance", "converter": "none" }
+       { "incoming_path": "/v1/dashboard/billing/credit_grants", "upstream_path": "/v0/resource/plugins/cpa-super-billing/balance", "converter": "none" }
      ]
    }
    ```
@@ -203,7 +203,26 @@ new-api 配置（渠道类型选「高级自定义」）：
 
 ### 导入价格表
 
-设置页「模型定价」卡片点「导入 JSON」。文件可以是数组，也可以是 `{"models": [...]}`，每项字段为 `name`、`aliases`、`input`、`output`、`cache_read`、`cache_write`（每百万 token 美元价），`name` 和每个别名都会写成一条自定义价，其他字段（例如阶梯价备注）忽略。也可以直接调用 `POST /v0/management/plugins/cpa-cc-billing/prices/import`。
+设置页「模型定价」卡片点「导入 JSON」。文件可以是数组，也可以是 `{"models": [...]}`，每项字段为 `name`、`aliases`、`input`、`output`、`cache_read`、`cache_write`（每百万 token 美元价），`name` 和每个别名都会写成一条自定义价，其他字段（例如阶梯价备注）忽略。也可以直接调用 `POST /v0/management/plugins/cpa-super-billing/prices/import`。
+
+## 从 cpa-cc-billing 迁移
+
+插件从 v0.3.0 起改名为 `cpa-super-billing`。CLIProxyAPI 按动态库文件名识别插件，改名等于安装一个新插件，配置、商店地址和余额路径都要手动改一次；数据库会自动沿用。
+
+1. 停止 CLIProxyAPI（Docker Compose 部署停止 `cli-proxy-api` 服务）。
+2. 备份 `plugins/cpa-cc-billing-state-v1.db`，连同同名的 `-wal`、`-shm` 文件（存在时）。
+3. 删除 `plugins` 目录（含按平台划分的子目录）里所有 `cpa-cc-billing*.so`（Windows 为 `.dll`，macOS 为 `.dylib`），再放入新插件 `cpa-super-billing*.so`。
+4. 在 `config.yaml` 里把 `plugins.configs.cpa-cc-billing` 整段改名为 `plugins.configs.cpa-super-billing`，段内的设置（包括 `store.version`、`store.release-tag` 版本锁）原样保留；如果锁了版本，改成新插件的版本号。
+5. 如果 `plugins.store-sources` 里引用了旧仓库的 `registry.json`，改成 `https://raw.githubusercontent.com/sketchain/cpa-super-billing/main/registry.json`。
+6. new-api 渠道的余额路由：把 `upstream_path` 从 `/v0/resource/plugins/cpa-cc-billing/balance` 改成 `/v0/resource/plugins/cpa-super-billing/balance`。管理页地址也变为 `/v0/resource/plugins/cpa-super-billing/ui`。
+7. 启动 CLIProxyAPI。
+
+> [!WARNING]
+> 新旧两个动态库不能同时留在 `plugins` 目录里。CLIProxyAPI 会把它们当成两个插件同时加载，请求会被拦截两次、用量记两次账。
+
+数据库：没有显式配置 `state_file` 时，新插件默认使用 `plugins/cpa-super-billing-state-v1.db`。如果这个文件还不存在、而旧的 `plugins/cpa-cc-billing-state-v1.db` 存在，插件启动时会像迁移前自动备份一样用 SQLite 的 `VACUUM INTO` 把旧库完整复制成新文件，校验通过后打开新文件，并在插件日志和「订阅分账」页提示。旧库保留不动，确认数据无误后可以手动删除（连同 `-wal`、`-shm`），删除后提示消失。复制失败时插件不会启动，日志写明原因；也可以把 `state_file` 显式指向旧文件继续使用。显式配置了 `state_file` 时，插件按配置打开，不做复制。
+
+浏览器里保存的登录凭证、主题、语言和视图偏好会在新页面首次打开时自动从旧名下复制过来。
 
 ## 从 cpa-key-billing 迁移
 
@@ -211,11 +230,11 @@ new-api 配置（渠道类型选「高级自定义」）：
 2. 复制为新文件名：
 
    ```sh
-   cp plugins/cpa-key-billing-state-v1.db plugins/cpa-cc-billing-state-v1.db
+   cp plugins/cpa-key-billing-state-v1.db plugins/cpa-super-billing-state-v1.db
    # 如果存在 -wal / -shm，也一起复制并改成同样的前缀
    ```
 
-3. 移除旧插件的动态库和 `plugins.configs.cpa-key-billing` 配置（两个插件同时启用会重复拦截和记账），安装本插件并加上 `plugins.configs.cpa-cc-billing`。
+3. 移除旧插件的动态库和 `plugins.configs.cpa-key-billing` 配置（两个插件同时启用会重复拦截和记账），安装本插件并加上 `plugins.configs.cpa-super-billing`。
 4. 启动 CLIProxyAPI。原有的 Key、套餐、路由、价格和历史请求全部保留；CC 分账用的新表（`cc_meta`、`cc_segments`、`cc_streams`、`cc_k_buckets`）会自动创建。原表结构版本不变，所以这个文件仍然可以被原插件打开。
 5. 打开「CC 分账」页，给账号选档位、建池、分配 key。插件会用保留期内的历史请求自动生成 1% 段，迁移后马上就有估算数据。
 
@@ -228,20 +247,20 @@ new-api 配置（渠道类型选「高级自定义」）：
 
 ### 商店安装
 
-CPA 管理面板（CPAMC 或 CPAMP）插件商店搜索 `cpa-cc-billing`。
+CPA 管理面板（CPAMC 或 CPAMP）插件商店搜索 `cpa-super-billing`。
 
 ### 人工安装
 
 在 CLIProxyAPI 根目录运行。macOS 和 Linux 使用：
 
 ```sh
-curl -LsSf https://raw.githubusercontent.com/sketchain/cpa-cc-billing/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/sketchain/cpa-super-billing/main/install.sh | sh
 ```
 
 Windows 请先停止 CLIProxyAPI，再在 PowerShell 中运行：
 
 ```powershell
-irm https://raw.githubusercontent.com/sketchain/cpa-cc-billing/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/sketchain/cpa-super-billing/main/install.ps1 | iex
 ```
 
 安装脚本会将插件安装到当前目录的 `plugins/`。安装或升级完成后需要重启 CLIProxyAPI。
@@ -253,7 +272,7 @@ plugins:
   enabled: true
   dir: "plugins"
   configs:
-    cpa-cc-billing:
+    cpa-super-billing:
       enabled: true
       priority: 100 # 插件调度优先级，数值越大越优先
       debug: false # 是否记录 debug 日志，例如路由日志、匹配参考价日志
@@ -263,7 +282,7 @@ plugins:
       mask_api_key_view_emails: false # 对 API Key 查询页面返回的邮箱进行掩码脱敏
       allow_api_key_quota_reset: false # 允许 API Key 用户重置可访问的 Codex 和 Claude 认证文件额度，消耗上游重置次数
       request_event_retention_days: 365 # 请求事件及关联错误事件的保留天数，正整数
-      state_file: "plugins/cpa-cc-billing-state-v1.db"
+      state_file: "plugins/cpa-super-billing-state-v1.db"
       routing:
         strategy: "round-robin" # round-robin、weighted-round-robin、fill-first
         session-affinity: false # 同一会话优先复用可用的上游凭证
@@ -282,14 +301,14 @@ CPA 按插件优先级选择调度插件，不会依次调用。建议显式设�
 > - 可以直接使用 cpa-key-billing v1.0.0 及以后版本的数据库文件，见[从 cpa-key-billing 迁移](#从-cpa-key-billing-迁移)。
 > - cpa-key-billing v0.8.4 及更早版本的 JSON 或 SQLite 数据文件不支持迁移，请将 `state_file` 指向新文件。
 
-重启 CLIProxyAPI 后，在管理中心打开「CPA CC Billing」。确认模型定价后，创建订阅计划并绑定需要限制的 API Key。
+重启 CLIProxyAPI 后，在管理中心打开「CPA Super Billing」。确认模型定价后，创建订阅计划并绑定需要限制的 API Key。
 
 ## 升级与数据库恢复
 
 ### 升级前
 
 1. 停止 CLIProxyAPI（Docker Compose 部署停止 `cli-proxy-api` 服务）。
-2. 备份 `state_file` 指向的数据库（默认 `plugins/cpa-cc-billing-state-v1.db`），连同同名的 `-wal`、`-shm` 文件（存在时）。这三个文件要在停止服务后一起复制，只复制 `.db` 可能丢失还没写回主文件的最新数据。
+2. 备份 `state_file` 指向的数据库（默认 `plugins/cpa-super-billing-state-v1.db`），连同同名的 `-wal`、`-shm` 文件（存在时）。这三个文件要在停止服务后一起复制，只复制 `.db` 可能丢失还没写回主文件的最新数据。
 3. 替换插件，启动 CLIProxyAPI。
 
 回退到旧版插件前，要先恢复升级前的备份：新版迁移过的数据库，旧版无法打开。
@@ -299,7 +318,7 @@ CPA 按插件优先级选择调度插件，不会依次调用。建议显式设�
 插件打开数据库时，如果需要升级表结构（计费表的 `PRAGMA user_version`，或 CC 表 `cc_meta` 的 `schema_version`），会先用 SQLite 的 `VACUUM INTO` 把整个数据库（包括 WAL 中的内容）备份到同一目录，确认备份能打开、完整后再迁移：
 
 ```text
-plugins/cpa-cc-billing-state-v1.db.bak-u24-to-u25-cc4-20261107T120000
+plugins/cpa-super-billing-state-v1.db.bak-u24-to-u25-cc4-20261107T120000
 ```
 
 文件名依次是计费表的旧、新版本，CC 表的旧、新版本（没有变化时只写一个），以及备份时间（UTC）。备份文件权限为 `600`，只保留最近 3 份，更早的自动删除；不需要迁移时不备份。备份成功后，插件日志会记录备份路径。
@@ -315,23 +334,23 @@ plugins/cpa-cc-billing-state-v1.db.bak-u24-to-u25-cc4-20261107T120000
 3. 没有合适的备份时，用 sqlite3 抢救损坏的文件，再用恢复出的文件替换原文件（同样删除原来的 `-wal`、`-shm`）：
 
    ```sh
-   sqlite3 plugins/cpa-cc-billing-state-v1.db ".recover" | sqlite3 plugins/cpa-cc-billing-state-v1.db.recovered
+   sqlite3 plugins/cpa-super-billing-state-v1.db ".recover" | sqlite3 plugins/cpa-super-billing-state-v1.db.recovered
    ```
 
 4. 启动后打开「CC 分账」页，点「从历史重建」，补回 `cc_segments` 等由请求历史推导出的数据。
 
 ## 页面访问
 
-管理员可以从 CLIProxyAPI 管理中心的「CPA CC Billing」菜单进入，也可以直接打开：
+管理员可以从 CLIProxyAPI 管理中心的「CPA Super Billing」菜单进入，也可以直接打开：
 
 ```text
-http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-cc-billing/ui
+http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-super-billing/ui
 ```
 
 普通用户使用自己的 API Key 查询订阅额度和用量时，直接打开：
 
 ```text
-http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-cc-billing/ui#account
+http(s)://<CLIProxyAPI 地址>/v0/resource/plugins/cpa-super-billing/ui#account
 ```
 
 设置页的「页面显示」卡片保存在数据库里，升级后自动带上默认值：

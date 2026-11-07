@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 // Cloud Code limits the model inventory reported to older clients.

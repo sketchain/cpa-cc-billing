@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 // KeyInfo is what the billing store knows about a downstream key.

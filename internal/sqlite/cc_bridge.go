@@ -3,7 +3,7 @@ package sqlite
 import (
 	"database/sql"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 // UpsertPrices saves several custom prices in one transaction: either all of

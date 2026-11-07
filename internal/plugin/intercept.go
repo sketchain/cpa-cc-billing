@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 // Bound the retry hint so clients periodically recheck quota availability.
@@ -157,7 +157,7 @@ func (a *App) interceptBeforeAuth(raw []byte) ([]byte, error) {
 		}
 	}
 
-	// cpa-cc-billing: CC pool reservations, before quota admission opens a cycle.
+	// cpa-super-billing: CC pool reservations, before quota admission opens a cycle.
 	if response, refused := a.ccAdmission(req.SourceFormat, scope, generate); refused {
 		if generate {
 			a.store.ReleaseSlot(req.RequestID)
@@ -465,8 +465,8 @@ func retryAfterSeconds(resetAt, now time.Time) int {
 
 func priceRefusal(format, code, message string) RequestInterceptResponse {
 	kind := refusal{
-		anthropicType: "cpa_cc_billing_error",
-		openaiType:    "cpa_cc_billing_error",
+		anthropicType: "cpa_super_billing_error",
+		openaiType:    "cpa_super_billing_error",
 		openaiCode:    code,
 	}
 	return RequestInterceptResponse{

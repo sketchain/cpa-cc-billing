@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// This file is the cpa-cc-billing bridge into the billing store. It keeps the
+// This file is the cpa-super-billing bridge into the billing store. It keeps the
 // CC features out of the upstream files.
 
 // UseRepository runs fn with the open repository under the store's read lock,

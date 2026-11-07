@@ -1,6 +1,6 @@
 "use strict";
 (() => {
-  const storageKey = "cpa-cc-billing:language";
+  const storageKey = "cpa-super-billing:language";
   const LANGUAGES = [["zh-CN", "简体中文"], ["en", "English"]];
   const embedded = window.parent !== window;
   const bindings = new WeakMap();
