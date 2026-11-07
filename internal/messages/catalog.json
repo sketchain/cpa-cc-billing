@@ -423,11 +423,16 @@
   },
   "Upstream returned HTTP %d: Credentials are invalid or expired": {
     "key": "backend.upstream_credentials_invalid",
-    "formats": ["%d"]
+    "formats": [
+      "%d"
+    ]
   },
   "Upstream returned HTTP %d: Credentials are invalid or expired: %s": {
     "key": "backend.upstream_credentials_invalid_detail",
-    "formats": ["%d", "%s"]
+    "formats": [
+      "%d",
+      "%s"
+    ]
   },
   "Upstream returned HTTP %d: %s": {
     "key": "backend.upstream_returned_http_value_value",
@@ -608,12 +613,6 @@
     "key": "backend.cleanup_age_must_be_an_integer",
     "formats": []
   },
-  "CC pool %q has no Claude account.": {
-    "key": "backend.cc_pool_value_has_no_claude_account",
-    "formats": [
-      "%q"
-    ]
-  },
   "API key blocked by the CC pool %q weekly reservation: the pool's estimated remaining weekly capacity $%.2f does not exceed the $%.2f reserved for fixed keys.": {
     "key": "backend.cc_blocked_weekly_reserve",
     "formats": [
@@ -742,5 +741,52 @@
   "Invalid quota cycle data": {
     "key": "backend.invalid_quota_cycle_data",
     "formats": []
+  },
+  "CC pool %q has no account.": {
+    "key": "backend.cc_pool_value_has_no_account",
+    "formats": [
+      "%q"
+    ]
+  },
+  "Unknown provider %q": {
+    "key": "backend.cc_unknown_provider_value",
+    "formats": [
+      "%q"
+    ]
+  },
+  "Unknown tier %q for provider %s": {
+    "key": "backend.cc_unknown_tier_value_for_provider_value",
+    "formats": [
+      "%q",
+      "%s"
+    ]
+  },
+  "The weekly total of tier %s must be a positive amount": {
+    "key": "backend.cc_tier_value_weekly_total_must_be_positive",
+    "formats": [
+      "%s"
+    ]
+  },
+  "The default k of tier %s must be from 1 to 100": {
+    "key": "backend.cc_tier_value_default_k_must_be_1_to_100",
+    "formats": [
+      "%s"
+    ]
+  },
+  "Tier %q is not a tier of %s accounts": {
+    "key": "backend.cc_tier_value_is_not_a_tier_of_value_accounts",
+    "formats": [
+      "%q",
+      "%s"
+    ]
+  },
+  "Account %s is a %s account; pool %q only holds %s accounts": {
+    "key": "backend.cc_account_value_is_value_pool_value_holds_value",
+    "formats": [
+      "%s",
+      "%s",
+      "%q",
+      "%s"
+    ]
   }
 }

@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func (d *DB) Load(requestEventCutoff, pluginLogCutoff time.Time) (billing.Snapshot, error) {

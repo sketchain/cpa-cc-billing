@@ -3,7 +3,7 @@ package billing
 import "testing"
 
 func TestDecodeConfigDefaults(t *testing.T) {
-	cfg, errDecode := DecodeConfig([]byte("enabled: true\npriority: 10\nstore:\n  id: cpa-cc-billing\n  version: 0.5.1\n"))
+	cfg, errDecode := DecodeConfig([]byte("enabled: true\npriority: 10\nstore:\n  id: cpa-super-billing\n  version: 0.5.1\n"))
 	if errDecode != nil {
 		t.Fatalf("DecodeConfig: %v", errDecode)
 	}

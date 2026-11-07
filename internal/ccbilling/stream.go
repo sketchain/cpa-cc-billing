@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Window lengths of Claude's unified limits.
+// Window lengths of the subscriptions' main limits.
 const (
 	FiveHours = 5 * time.Hour
 	Week      = 7 * 24 * time.Hour
@@ -24,8 +24,8 @@ const (
 	gainEpsilon     = 1e-6
 )
 
-// Observation is what one response reported about an account's unified windows.
-// Anthropic evaluates the headers when it admits the request, so At is the
+// Observation is what one response reported about an account's main windows.
+// The provider evaluates them when it admits the request, so At is the
 // request's start time.
 type Observation struct {
 	At      time.Time `json:"at"`
@@ -35,6 +35,17 @@ type Observation struct {
 	Has7d   bool      `json:"has_7d"`
 	Used7d  float64   `json:"used_7d"`
 	Reset7d time.Time `json:"reset_7d,omitzero"`
+	// LimitReached is the provider saying the limit is used up; stored
+	// reports do not keep it, and a window at 100% says the same.
+	LimitReached bool `json:"limit_reached,omitempty"`
+	// Credits is the credit balance the report named, when HasCredits.
+	HasCredits bool    `json:"has_credits,omitempty"`
+	Credits    float64 `json:"credits,omitempty"`
+}
+
+// exhausted reports a main window used up.
+func (o Observation) exhausted() bool {
+	return o.LimitReached || o.Has5h && o.Used5h >= 100 || o.Has7d && o.Used7d >= 100
 }
 
 // CostEvent is one request's cost, which counts against the account once the
@@ -44,7 +55,28 @@ type CostEvent struct {
 	USD float64
 	// Model is the request's normalized billing model; "" when unknown.
 	Model string
+	// Excluded is why the provider's segment rules leave the request out,
+	// "" when it counts.
+	Excluded string
 }
+
+// Reasons a request's cost stays out of the segments.
+const (
+	// ExcludedOtherLimit: the request was metered against another limit
+	// than the main one, so its report has no main window.
+	ExcludedOtherLimit = "other_limit"
+	// ExcludedUnpriced: the request's model has no price.
+	ExcludedUnpriced = "unpriced"
+)
+
+// Reasons an account's segments are paused.
+const (
+	PauseLimitReached = "limit_reached"
+	PauseCredits      = "credits"
+)
+
+// maxUnpricedModels bounds the unpriced models a stream remembers.
+const maxUnpricedModels = 50
 
 // Segment is the cost of one rise of the 5-hour utilization, normally 1%, of
 // one account. Block is the start of the uninterrupted run it belongs to.
@@ -56,6 +88,33 @@ type Segment struct {
 	// Models splits CostUSD by billing model. A segment recorded before the
 	// split existed has none; cost whose model is unknown is under "".
 	Models map[string]float64 `json:"models,omitempty"`
+}
+
+// ExcludedCost is what an account's segment rules left out of its segments.
+type ExcludedCost struct {
+	// USD and Requests by reason.
+	USD      map[string]float64 `json:"usd,omitempty"`
+	Requests map[string]int64   `json:"requests,omitempty"`
+	// UnpricedModels counts the unpriced requests of each model.
+	UnpricedModels map[string]int64 `json:"unpriced_models,omitempty"`
+}
+
+func (e *ExcludedCost) add(cost CostEvent) {
+	if e.USD == nil {
+		e.USD, e.Requests = map[string]float64{}, map[string]int64{}
+	}
+	if finite(cost.USD) && cost.USD > 0 {
+		e.USD[cost.Excluded] += cost.USD
+	}
+	e.Requests[cost.Excluded]++
+	if cost.Excluded == ExcludedUnpriced {
+		if e.UnpricedModels == nil {
+			e.UnpricedModels = map[string]int64{}
+		}
+		if _, known := e.UnpricedModels[cost.Model]; known || len(e.UnpricedModels) < maxUnpricedModels {
+			e.UnpricedModels[cost.Model]++
+		}
+	}
 }
 
 // unknownModel holds the part of a segment's cost whose model is unknown.
@@ -174,17 +233,55 @@ type StreamState struct {
 	// K follows the same reports for k evidence with its own cursor, so k can
 	// be rebuilt from history without touching the segments.
 	K KStream `json:"k"`
+	// Window is the window segments measure: the 5-hour one, or the 7-day
+	// one while the account's reports have no 5-hour window. "" before the
+	// first report, and in streams saved before it existed, means 5 hours.
+	Window string `json:"window,omitempty"`
+	// CutAt is the utilization at the latest segment boundary of the block.
+	// A segment ends when the utilization crosses a whole point, so reports
+	// with decimals add up to whole-point segments.
+	CutAt float64 `json:"cut_at,omitempty"`
+	// Paused, with its reason and start, stops segments while the provider's
+	// rules say usage does not move the utilization.
+	Paused      bool      `json:"paused,omitempty"`
+	PauseReason string    `json:"pause_reason,omitempty"`
+	PausedSince time.Time `json:"paused_since,omitzero"`
+	// LastCredits is the credit balance of the latest report that named one.
+	HasCredits  bool    `json:"has_credits,omitempty"`
+	LastCredits float64 `json:"last_credits,omitempty"`
+	// Excluded is the cost the segment rules left out.
+	Excluded ExcludedCost `json:"excluded,omitzero"`
+
+	// restarted reports that the segment window changed, so the segments
+	// stored before measure another window and are dropped.
+	restarted bool
 }
 
 func (s *StreamState) breakBlock() {
-	s.BlockStart, s.Armed, s.AccCost, s.AccModels = time.Time{}, false, 0, nil
+	s.BlockStart, s.Armed, s.AccCost, s.AccModels, s.CutAt = time.Time{}, false, 0, nil, 0
+}
+
+// window is the window segments measure.
+func (s *StreamState) window() string {
+	if s.Window == WindowWeek {
+		return WindowWeek
+	}
+	return WindowFiveHour
+}
+
+// crossesPoint reports whether a rise from previous to current utilization
+// crosses a whole point. Values within a millionth of a point of a whole one
+// count as that point, absorbing the rounding of fractions times 100.
+func crossesPoint(previous, current float64) bool {
+	return math.Floor(current+gainEpsilon) > math.Floor(previous+gainEpsilon)
 }
 
 type streamEvent struct {
-	at    time.Time
-	obs   *Observation
-	cost  float64
-	model string
+	at       time.Time
+	obs      *Observation
+	cost     float64
+	model    string
+	excluded string
 }
 
 // Advance consumes the observations and costs that happened after the cursor
@@ -198,7 +295,7 @@ func (s *StreamState) Advance(observations []Observation, costs []CostEvent, unt
 	}
 	for _, cost := range costs {
 		if cost.At.After(s.Cursor) && !cost.At.After(until) {
-			events = append(events, streamEvent{at: cost.At, cost: cost.USD, model: cost.Model})
+			events = append(events, streamEvent{at: cost.At, cost: cost.USD, model: cost.Model, excluded: cost.Excluded})
 		}
 	}
 	// A report precedes a cost at the same instant: it was evaluated before
@@ -211,6 +308,7 @@ func (s *StreamState) Advance(observations []Observation, costs []CostEvent, unt
 	})
 	var segments []Segment
 	gap := params.gap()
+	rules := params.rules
 	for _, event := range events {
 		if !s.LastEventAt.IsZero() && event.at.Sub(s.LastEventAt) > gap {
 			s.breakBlock()
@@ -222,6 +320,10 @@ func (s *StreamState) Advance(observations []Observation, costs []CostEvent, unt
 			s.BlockStart = event.at
 		}
 		if event.obs == nil {
+			if event.excluded != "" {
+				s.Excluded.add(CostEvent{USD: event.cost, Model: event.model, Excluded: event.excluded})
+				continue
+			}
 			if s.Armed && finite(event.cost) && event.cost > 0 {
 				s.AccCost += event.cost
 				if s.AccModels == nil {
@@ -232,24 +334,66 @@ func (s *StreamState) Advance(observations []Observation, costs []CostEvent, unt
 			continue
 		}
 		obs := event.obs
+		// An account whose reports have no 5-hour window measures the 7-day
+		// one; once a 5-hour window appears it measures that, and the
+		// segments of the 7-day window are dropped.
+		switch {
+		case obs.Has5h && s.Window == WindowWeek:
+			s.Window, s.restarted = WindowFiveHour, true
+			s.breakBlock()
+			segments = nil
+		case obs.Has5h && s.Window == "":
+			s.Window = WindowFiveHour
+		case !obs.Has5h && obs.Has7d && s.Window == "":
+			s.Window = WindowWeek
+		}
 		step5, delta5 := stepStale, 0.0
 		if obs.Has5h {
 			step5, delta5 = s.FiveHour.observe(obs.At, obs.Used5h, obs.Reset5h)
 		}
+		step7, delta7 := stepStale, 0.0
 		if obs.Has7d {
-			s.Weekly.observe(obs.At, obs.Used7d, obs.Reset7d)
+			step7, delta7 = s.Weekly.observe(obs.At, obs.Used7d, obs.Reset7d)
 		}
-		switch step5 {
+		step, delta, track := step5, delta5, &s.FiveHour
+		if s.window() == WindowWeek {
+			step, delta, track = step7, delta7, &s.Weekly
+		}
+		if rules.PauseWhenExhausted {
+			creditsUsed := obs.HasCredits && s.HasCredits && obs.Credits < s.LastCredits-gainEpsilon
+			if obs.HasCredits {
+				s.HasCredits, s.LastCredits = true, obs.Credits
+			}
+			if obs.exhausted() || creditsUsed {
+				// Usage beyond the limit, or paid for with credits, does
+				// not move the utilization: no segment may include it.
+				if !s.Paused {
+					s.Paused, s.PausedSince, s.PauseReason = true, obs.At, PauseLimitReached
+					if creditsUsed && !obs.exhausted() {
+						s.PauseReason = PauseCredits
+					}
+				}
+				s.breakBlock()
+				continue
+			}
+			if s.Paused {
+				s.Paused, s.PausedSince, s.PauseReason = false, time.Time{}, ""
+				s.breakBlock()
+				s.BlockStart = event.at
+				continue
+			}
+		}
+		switch step {
 		case stepNewPeriod:
 			s.breakBlock()
 			s.BlockStart = event.at
 		case stepSame:
-			if delta5 > gainEpsilon {
+			if delta > gainEpsilon && crossesPoint(track.Max-delta, track.Max) {
 				if s.Armed {
-					segments = append(segments, Segment{At: event.at, Block: s.BlockStart, CostUSD: s.AccCost, Gain: roundGain(delta5),
+					segments = append(segments, Segment{At: event.at, Block: s.BlockStart, CostUSD: s.AccCost, Gain: roundGain(track.Max - s.CutAt),
 						Models: splitCosts(s.AccCost, s.AccModels)})
 				}
-				s.Armed, s.AccCost, s.AccModels = true, 0, nil
+				s.Armed, s.AccCost, s.AccModels, s.CutAt = true, 0, nil, track.Max
 			}
 		}
 	}

@@ -20,7 +20,7 @@ function ccSimInput(value, onChange, attrs = {}) {
   });
 }
 
-function ccSimPools(data) { return data.cc.settings.pools.filter((pool) => pool.auth_indexes.length); }
+function ccSimPools(data) { return ccShownPools(data).filter((pool) => pool.auth_indexes.length); }
 
 function ccSimFixedKeys(data, poolID) {
   return data.cc.keys.filter((key) => key.settings.kind === "fixed" && key.settings.pool_id === poolID && key.valid);

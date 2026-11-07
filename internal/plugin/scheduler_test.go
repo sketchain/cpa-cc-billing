@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func configuredRoutingApp(t *testing.T, rule billing.RouteRule) (*App, string) {

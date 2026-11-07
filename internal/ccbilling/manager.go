@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 // KeyInfo is what the billing store knows about a downstream key.
@@ -67,8 +67,10 @@ type Host interface {
 	WithDB(fn func(*sql.DB) error) error
 	Now() time.Time
 	ToUSD(amount float64, currency string) float64
-	LatestObservations(authIndexes []string, since time.Time) (map[string]Observation, error)
-	WeeklyPeriod(authIndex string, now time.Time) (WeeklyPeriod, bool, error)
+	// LatestObservations reads each account's latest main window reports
+	// from its source.
+	LatestObservations(sources map[string]QuotaSource, since time.Time) (map[string]Observation, error)
+	WeeklyPeriod(authIndex string, source QuotaSource, now time.Time) (WeeklyPeriod, bool, error)
 	KeyInfo(scope string) (KeyInfo, bool)
 	// KeyUsageUSD returns the key's usage and the usage sequence number it includes.
 	KeyUsageUSD(scope string, from, to time.Time) (float64, uint64, error)
@@ -94,6 +96,12 @@ type accountSnapshot struct {
 	hasWeek  bool
 	cursor   time.Time
 	kCursor  time.Time
+	// window, pause and excluded come from the account's stream.
+	window      string
+	paused      bool
+	pauseReason string
+	pausedSince time.Time
+	excluded    ExcludedCost
 }
 
 // keySnapshot is what a refresh read about an assigned key. Usage observed
@@ -115,7 +123,8 @@ type snapshot struct {
 	settings Settings
 	accounts map[string]accountSnapshot
 	keys     map[string]keySnapshot
-	weights  weightsSnapshot
+	// weights is each provider's quota weights.
+	weights map[string]weightsSnapshot
 }
 
 type costDelta struct {
@@ -160,9 +169,9 @@ type Manager struct {
 	alignMu    sync.Mutex
 	alignments map[string]alignmentEntry
 
-	// weightCache holds the last weight estimate and the inputs it used; it
-	// belongs to refreshMu.
-	weightCache weightCache
+	// weightCache holds each provider's last weight estimate and the inputs
+	// it used; it belongs to refreshMu.
+	weightCache map[string]weightCache
 
 	panel atomic.Pointer[PanelSettings]
 
@@ -233,7 +242,7 @@ func (m *Manager) Rebuild() error {
 		return err
 	}
 	m.accounts = map[string]*accountCache{}
-	m.weightCache = weightCache{}
+	m.weightCache = nil
 	return m.refreshLocked()
 }
 
@@ -336,6 +345,12 @@ func mergeLatest(current, next Observation) Observation {
 		}
 	}
 	newer := next.At.After(current.At)
+	if newer || current.At.IsZero() {
+		current.LimitReached = next.LimitReached
+		if next.HasCredits {
+			current.HasCredits, current.Credits = true, next.Credits
+		}
+	}
 	merge(&current.Has5h, &current.Used5h, &current.Reset5h, next.Has5h, next.Used5h, next.Reset5h, newer)
 	merge(&current.Has7d, &current.Used7d, &current.Reset7d, next.Has7d, next.Used7d, next.Reset7d, newer)
 	if newer {
@@ -375,7 +390,7 @@ func (m *Manager) withDB(fn func(*sql.DB) error) error {
 			m.loaded.Store(&settings)
 			m.panel.Store(&panel)
 			m.accounts = map[string]*accountCache{}
-			m.weightCache = weightCache{}
+			m.weightCache = nil
 			m.lastRefresh, m.lastPrune = time.Time{}, time.Time{}
 			m.snap.Store(nil)
 			m.liveMu.Lock()
@@ -394,7 +409,7 @@ func (m *Manager) withDB(fn func(*sql.DB) error) error {
 func (m *Manager) refreshLocked() error {
 	now := m.host.Now()
 	accounts := map[string]accountSnapshot{}
-	var weights weightsSnapshot
+	var weights map[string]weightsSnapshot
 	err := m.withDB(func(db *sql.DB) error {
 		if err := m.flushBlocksLocked(db); err != nil {
 			// Counts stay pending; the estimates must not wait for them.
@@ -447,14 +462,23 @@ func (m *Manager) refreshLocked() error {
 		}
 		for _, authIndex := range m.settings.authIndexes() {
 			cache := m.accounts[authIndex]
-			account := accountSnapshot{k: EstimateK(cache.buckets, params, now), cursor: cache.stream.Cursor, kCursor: cache.stream.K.Cursor}
+			params := m.settings.accountParams(authIndex)
+			provider := weights[m.settings.AccountProvider(authIndex)]
+			stream := cache.stream
+			account := accountSnapshot{k: EstimateK(cache.buckets, params, now), cursor: stream.Cursor, kCursor: stream.K.Cursor,
+				window: stream.window(), paused: stream.Paused, pauseReason: stream.PauseReason, pausedSince: stream.PausedSince,
+				excluded: stream.Excluded}
 			account.raw = EstimateSegments(cache.segments, params, now)
 			account.weighted = account.raw
-			if len(weights.factors) > 0 {
-				account.weighted = EstimateSegments(ConvertSegments(cache.segments, weights.factors), params, now)
+			if len(provider.factors) > 0 {
+				account.weighted = EstimateSegments(ConvertSegments(cache.segments, provider.factors), params, now)
+			}
+			if account.window == WindowWeek {
+				// Segments of the 7-day window give its total; "" means 5 hours.
+				account.raw.Window, account.weighted.Window = WindowWeek, WindowWeek
 			}
 			account.estimate = account.raw
-			if weights.basis == BasisWeighted {
+			if provider.basis == BasisWeighted {
 				account.estimate = account.weighted
 			}
 			accounts[authIndex] = account
@@ -476,7 +500,7 @@ func (m *Manager) refreshLocked() error {
 	}
 	previous := m.snap.Load()
 	indexes := m.settings.authIndexes()
-	if latest, err := m.host.LatestObservations(indexes, now.Add(-Week-time.Hour)); err == nil {
+	if latest, err := m.host.LatestObservations(m.settings.AccountSources(), now.Add(-Week-time.Hour)); err == nil {
 		m.liveMu.Lock()
 		for index, obs := range latest {
 			m.latest[index] = mergeLatest(m.latest[index], obs)
@@ -487,7 +511,7 @@ func (m *Manager) refreshLocked() error {
 	}
 	for _, index := range indexes {
 		account := accounts[index]
-		if period, ok, err := m.host.WeeklyPeriod(index, now); err == nil {
+		if period, ok, err := m.host.WeeklyPeriod(index, m.settings.accountSource(index), now); err == nil {
 			account.weekly, account.hasWeek = period, ok
 		} else {
 			// Keep the last known period rather than forgetting it.
@@ -594,12 +618,13 @@ func (m *Manager) recordError(err error) {
 // until, or until the deadline passes. Segments and k evidence keep separate
 // cursors, so k can be rebuilt without touching the segments.
 func (m *Manager) advance(db *sql.DB, authIndex string, cache *accountCache, until, deadline time.Time) error {
-	params := m.settings.Params
+	params := m.settings.accountParams(authIndex)
+	source := m.settings.accountSource(authIndex)
 	if cache.stream.Cursor.IsZero() || cache.stream.K.Cursor.IsZero() {
 		var first sql.NullInt64
 		if err := db.QueryRow(`SELECT min(at) FROM quota_report_windows WHERE auth_index = ? AND provider = ?`,
-			authIndex, claudeProvider).Scan(&first); err != nil {
-			return fmt.Errorf("Read Claude quota reports: %w", err)
+			authIndex, source.Provider).Scan(&first); err != nil {
+			return fmt.Errorf("Read quota reports: %w", err)
 		}
 		if !first.Valid {
 			return nil
@@ -624,14 +649,14 @@ func (m *Manager) advance(db *sql.DB, authIndex string, cache *accountCache, unt
 		if end.After(until) {
 			end = until
 		}
-		observations, err := readObservations(db, authIndex, from, end)
+		observations, err := readObservations(db, source, authIndex, from, end)
 		if err != nil {
 			return err
 		}
 		next := cache.stream
 		var segments []Segment
 		if next.Cursor.Before(end) {
-			costs, err := readCosts(db, authIndex, next.Cursor, end, m.host.ToUSD)
+			costs, err := readCosts(db, source, params.rules, authIndex, next.Cursor, end, m.host.ToUSD)
 			if err != nil {
 				return err
 			}
@@ -643,6 +668,10 @@ func (m *Manager) advance(db *sql.DB, authIndex string, cache *accountCache, unt
 		}
 		if err := commitAdvance(db, authIndex, next, segments, buckets); err != nil {
 			return err
+		}
+		if next.restarted {
+			cache.segments = nil
+			next.restarted = false
 		}
 		cache.stream = next
 		cache.segments = append(cache.segments, segments...)
@@ -682,7 +711,29 @@ func deltaSum(deltas []costDelta, seq uint64, from, to time.Time) float64 {
 
 func accountStatus(snap *snapshot, latest map[string]Observation, authIndex string, now time.Time) AccountStatus {
 	account := snap.accounts[authIndex]
-	return ResolveAccount(authIndex, snap.settings.Accounts[authIndex], account.estimate, account.k, latest[authIndex], snap.settings.Params, now)
+	provider := snap.settings.AccountProvider(authIndex)
+	params := snap.settings.ParamsFor(provider)
+	status := ResolveAccount(authIndex, snap.settings.Accounts[authIndex], account.estimate, account.k, latest[authIndex], params, now)
+	status.Provider = provider
+	if params.rules.PauseWhenExhausted {
+		live := latest[authIndex]
+		current := live
+		// A window whose reset passed is no longer used up.
+		current.Has5h = live.Has5h && (live.Reset5h.IsZero() || live.Reset5h.After(now))
+		current.Has7d = live.Has7d && (live.Reset7d.IsZero() || live.Reset7d.After(now))
+		switch {
+		case current.exhausted():
+			status.Paused, status.PauseReason = true, PauseLimitReached
+			if account.paused {
+				status.PausedSince = account.pausedSince
+			}
+		case account.paused && (account.pauseReason == PauseCredits || !live.At.After(account.cursor)):
+			// The history is processed up to the cursor; a newer live
+			// report below the limit means the account recovered since.
+			status.Paused, status.PauseReason, status.PausedSince = true, account.pauseReason, account.pausedSince
+		}
+	}
+	return status
 }
 
 // poolStatus reads only the snapshot and the live state.
@@ -898,18 +949,23 @@ type AccountView struct {
 	WeeklyStart  time.Time      `json:"weekly_start,omitzero"`
 	EarlyResetAt time.Time      `json:"early_reset_at,omitzero"`
 	RecentBlocks []BlockSummary `json:"recent_blocks"`
+	// Excluded is the cost the provider's segment rules left out.
+	Excluded ExcludedCost `json:"excluded"`
 }
 
 // View is the CC page.
 type View struct {
-	Settings Settings      `json:"settings"`
-	Defaults Params        `json:"defaults"`
-	Accounts []AccountView `json:"accounts"`
-	Pools    []PoolStatus  `json:"pools"`
-	Keys     []KeyStatus   `json:"keys"`
-	Segments int           `json:"stored_segments"`
-	Weights  WeightsView   `json:"weights"`
-	Error    string        `json:"error,omitempty"`
+	Settings Settings `json:"settings"`
+	Defaults Params   `json:"defaults"`
+	// DefaultProviders are the built-in provider profiles.
+	DefaultProviders map[string]ProviderProfile `json:"default_providers"`
+	Accounts         []AccountView              `json:"accounts"`
+	Pools            []PoolStatus               `json:"pools"`
+	Keys             []KeyStatus                `json:"keys"`
+	Segments         int                        `json:"stored_segments"`
+	// Weights is each provider's model quota weights.
+	Weights map[string]WeightsView `json:"weights"`
+	Error   string                 `json:"error,omitempty"`
 	// Warnings are problems the settings check cannot prevent, such as a
 	// fixed key's plan switched to a shared quota after the settings saved.
 	Warnings []messages.Message `json:"warnings"`
@@ -933,10 +989,10 @@ func (m *Manager) View() (View, error) {
 			}
 			return View{}, refreshErr
 		}
-		return View{Settings: *settings, Defaults: DefaultParams(), Accounts: []AccountView{}, Pools: []PoolStatus{}, Keys: []KeyStatus{},
-			Weights: emptyWeightsView(), Warnings: []messages.Message{}, Error: m.lastError.Load().(string), At: now}, nil
+		return View{Settings: *settings, Defaults: DefaultGlobalParams(), DefaultProviders: DefaultProviders(), Accounts: []AccountView{}, Pools: []PoolStatus{}, Keys: []KeyStatus{},
+			Weights: emptyWeightsViews(), Warnings: []messages.Message{}, Error: m.lastError.Load().(string), At: now}, nil
 	}
-	view := View{Settings: snap.settings, Defaults: DefaultParams(), Accounts: []AccountView{}, Pools: []PoolStatus{}, Keys: []KeyStatus{},
+	view := View{Settings: snap.settings, Defaults: DefaultGlobalParams(), DefaultProviders: DefaultProviders(), Accounts: []AccountView{}, Pools: []PoolStatus{}, Keys: []KeyStatus{},
 		Error: m.lastError.Load().(string), At: now, Loaded: true}
 	m.refreshMu.Lock()
 	_ = m.withDB(func(db *sql.DB) error {
@@ -945,11 +1001,11 @@ func (m *Manager) View() (View, error) {
 	})
 	m.refreshMu.Unlock()
 	latest, deltas := m.live(snap)
-	view.Weights = weightsView(snap, latest, now)
+	view.Weights = weightsViews(snap, latest, now)
 	for _, index := range snap.settings.authIndexes() {
 		account := AccountView{AccountStatus: accountStatus(snap, latest, index, now), RecentBlocks: []BlockSummary{}}
 		cached := snap.accounts[index]
-		account.Cursor, account.KCursor = cached.cursor, cached.kCursor
+		account.Cursor, account.KCursor, account.Excluded = cached.cursor, cached.kCursor, cached.excluded
 		if cached.hasWeek {
 			account.WeeklyStart, account.EarlyResetAt = cached.weekly.Start, cached.weekly.EarlyResetAt
 		}
@@ -1002,6 +1058,10 @@ func (m *Manager) View() (View, error) {
 // AccountSummary is a pooled account's estimate as the auth files page shows it.
 type AccountSummary struct {
 	Pools             []string `json:"pools"`
+	Provider          string   `json:"provider"`
+	SegmentWindow     string   `json:"segment_window"`
+	NeedsK            bool     `json:"needs_k"`
+	Paused            bool     `json:"paused"`
 	Tier              string   `json:"tier"`
 	FiveHourTotal     float64  `json:"five_hour_total_usd"`
 	WeeklyTotal       float64  `json:"weekly_total_usd"`
@@ -1035,16 +1095,24 @@ func (m *Manager) AccountSummaries() map[string]AccountSummary {
 			summary, ok := result[index]
 			if !ok {
 				status := accountStatus(snap, latest, index, now)
-				summary = AccountSummary{Tier: status.Tier, FiveHourTotal: status.FiveHourTotal, WeeklyTotal: status.WeeklyTotal,
+				summary = AccountSummary{Provider: status.Provider, SegmentWindow: segmentWindow(status.Window), NeedsK: status.NeedsK, Paused: status.Paused, Tier: status.Tier, FiveHourTotal: status.FiveHourTotal, WeeklyTotal: status.WeeklyTotal,
 					TotalsFrom: status.TotalsFrom, K: status.K, KSource: status.KSource, RemainingWeek: status.RemainingWeek,
 					RemainingFiveHour: status.RemainingFiveHour, ColdStart: status.ColdStart, CleanBlocks: status.CleanBlocks,
-					ColdStartBlocks: snap.settings.Params.ColdStartBlocks}
+					ColdStartBlocks: snap.settings.ParamsFor(status.Provider).ColdStartBlocks}
 			}
 			summary.Pools = append(summary.Pools, name)
 			result[index] = summary
 		}
 	}
 	return result
+}
+
+// segmentWindow names the window an estimate's segments measure.
+func segmentWindow(window string) string {
+	if window == WindowWeek {
+		return WindowWeek
+	}
+	return WindowFiveHour
 }
 
 // admitUnloaded decides before the first snapshot. Once the settings are
@@ -1109,6 +1177,16 @@ func keyLabel(scope string, host Host) string {
 		return info.Preview
 	}
 	return scope
+}
+
+// AccountSource is where a configured account's main window reports come
+// from, as the loaded settings say; false when the account is not configured.
+func (m *Manager) AccountSource(authIndex string) (QuotaSource, bool) {
+	settings := m.loaded.Load()
+	if settings == nil || !slices.Contains(settings.authIndexes(), authIndex) {
+		return QuotaSource{}, false
+	}
+	return settings.accountSource(authIndex), true
 }
 
 // KeyKind is the key's type in the loaded settings, or "" when unassigned.

@@ -1,10 +1,53 @@
-// CC split: Claude account estimates, pools, key assignments and parameters.
-// The page edits a draft of the settings and saves it as a whole.
+// Subscription split: estimates of Claude and ChatGPT (Codex) accounts, pools,
+// key assignments and parameters, one provider tab at a time. The page edits
+// a draft of the settings and saves it as a whole.
 const ccQuery = createQuery(m("cc.title"));
 const ccTrendQuery = createQuery(m("cc.trend_title"));
 const ccForecastQuery = createQuery(m("cc.forecast_title"));
 const ccUsageQuery = createQuery(m("cc.usage_title"));
-const ccState = { draft: null, dirty: false, busy: false, openBlocks: new Set() };
+const CC_PROVIDERS = ["claude", "codex"];
+const CC_PROVIDER_KEY = "cpa-super-billing.split-provider.v1";
+const ccState = { draft: null, dirty: false, busy: false, openBlocks: new Set(), provider: ccStoredProvider() };
+
+function ccStoredProvider() {
+  try {
+    const stored = sessionStorage.getItem(CC_PROVIDER_KEY);
+    return CC_PROVIDERS.includes(stored) ? stored : "claude";
+  } catch (_) { return "claude"; }
+}
+
+function ccSetProvider(provider) {
+  ccState.provider = provider;
+  try { sessionStorage.setItem(CC_PROVIDER_KEY, provider); } catch (_) {}
+  renderCC();
+}
+
+function ccProviderLabel(provider) { return m("cc.provider_" + provider); }
+function ccPoolProvider(pool) { return pool?.provider || "claude"; }
+
+// The provider of an account: its pool's, else its credential's, else the
+// one its settings keep, else Claude.
+function ccAccountProvider(data, draft, index) {
+  const pool = draft.pools.find((item) => item.auth_indexes.includes(index));
+  if (pool) return ccPoolProvider(pool);
+  const credential = data.credentials.find((item) => item.auth_index === index);
+  if (credential?.provider) return credential.provider;
+  const view = data.cc.accounts.find((item) => item.auth_index === index);
+  if (view?.provider) return view.provider;
+  return draft.accounts[index]?.provider || "claude";
+}
+
+// The provider profile being edited, and a parameter in effect for it.
+function ccProfile(draft, provider = ccState.provider) { return draft.providers[provider]; }
+function ccEffectiveParam(draft, name, provider = ccState.provider) {
+  return ccProfile(draft, provider)?.params?.[name] ?? draft.params[name];
+}
+
+function ccTierLabel(tier) {
+  const key = "cc.tier_" + tier.id;
+  const label = m(key);
+  return String(label) === key ? tier.name || tier.id : label;
+}
 
 const CC_PARAM_FIELDS = [
   { name: "segment_retention_days", label: "cc.param_segment_retention_days", hint: "cc.hint_segment_retention_days", step: "1" },
@@ -20,9 +63,9 @@ const CC_PARAM_FIELDS = [
   { name: "cold_start_blocks", label: "cc.param_cold_start_blocks", hint: "cc.hint_cold_start_blocks", step: "1" },
   { name: "safety_factor", label: "cc.param_safety_factor", hint: "cc.hint_safety_factor", percent: true }
 ];
-const CC_TIERS = ["pro", "max5x", "max20x"];
+const CC_PROVIDER_OVERRIDES = ["block_gap_minutes", "window_percent", "k_min_weekly_points", "cold_start_blocks", "safety_factor"];
 
-pages.admin.cc = {
+pages.admin.split = {
   autoRefresh: true,
   // Auto refresh would rebuild the inputs being edited; it waits for a save,
   // and while a simulation or forecast input has focus.
@@ -182,6 +225,7 @@ function renderCC() {
   draft.accounts ||= {};
   draft.keys ||= {};
   draft.pools ||= [];
+  draft.providers ||= structuredClone(data.cc.default_providers || {});
   const notices = [];
   if (data.cc.loaded === false)
     notices.push(
@@ -210,10 +254,26 @@ function renderCC() {
     );
   if (data.credential_warning)
     notices.push(el("div", { class: "notice err show", text: m("cc.credential_warning", { v0: data.credential_warning }) }));
+  if (data.legacy_database) {
+    const legacy = data.legacy_database;
+    notices.push(
+      el("div", {
+        class: "notice show cc-legacy-database",
+        role: "status",
+        text: m(ccWhen(legacy.copied_at) !== "—" ? "cc.legacy_database_copied" : "cc.legacy_database_kept", {
+          v0: legacy.path,
+          v1: legacy.active
+        })
+      })
+    );
+  }
   target.replaceChildren(
     ...notices,
     el("p", { id: "cc-dirty", class: "notice err show hidden", text: m("cc.unsaved_changes") }),
+    ccProviderTabs(data, draft),
+    ...ccProviderNotices(data, draft),
     ccAccountsSection(data, draft),
+    ccExcludedSection(data, draft) || "",
     el("div", { id: "cc-forecast", class: "cc-section" }),
     el("div", { id: "cc-trend", class: "cc-section" }),
     el("div", { id: "cc-usage", class: "cc-section" }),
@@ -222,7 +282,7 @@ function renderCC() {
     ccKeysSection(data, draft),
     el("div", { id: "cc-sim", class: "cc-section" }),
     ccParamsSection(data, draft),
-    ccBlocksSection(data)
+    ccBlocksSection(data, draft)
   );
   renderCCForecast();
   renderCCTrend();
@@ -231,17 +291,86 @@ function renderCC() {
   updateCCButtons();
 }
 
+// Tabs of the providers, each with its number of pools.
+function ccProviderTabs(data, draft) {
+  return el(
+    "div",
+    { class: "segmented-control cc-provider-tabs", role: "tablist", "aria-label": m("cc.provider") },
+    CC_PROVIDERS.map((provider) => {
+      const pools = draft.pools.filter((pool) => ccPoolProvider(pool) === provider).length;
+      const active = provider === ccState.provider;
+      return el("button", {
+        type: "button",
+        role: "tab",
+        class: active ? "active" : "",
+        "aria-selected": active ? "true" : "false",
+        "data-provider": provider,
+        text: ccProviderLabel(provider) + (pools ? DISPLAY_SEPARATOR + m("cc.provider_pools", { v0: pools }) : ""),
+        onclick: () => { if (!active) ccSetProvider(provider); }
+      });
+    })
+  );
+}
+
+// Warnings about the provider on display: accounts that need a k, paused
+// estimates, unpriced models and keys whose routing reaches other providers.
+function ccProviderNotices(data, draft) {
+  const notices = [];
+  const accounts = data.cc.accounts.filter((account) => ccAccountProvider(data, draft, account.auth_index) === ccState.provider);
+  const needsK = accounts.filter((account) => account.needs_k).map((account) => ccCredentialName(data, account.auth_index));
+  if (needsK.length)
+    notices.push(
+      el("div", { class: "notice err show cc-needs-k", role: "alert", text: m("cc.needs_k_notice", { v0: needsK.join(", ") }) })
+    );
+  const paused = accounts.filter((account) => account.paused).map((account) => ccCredentialName(data, account.auth_index));
+  if (paused.length) notices.push(el("div", { class: "notice show cc-paused", text: m("cc.paused_notice", { v0: paused.join(", ") }) }));
+  const unpriced = [...new Set(accounts.flatMap((account) => Object.keys(account.excluded?.unpriced_models || {})))];
+  if (unpriced.length)
+    notices.push(
+      el(
+        "div",
+        { class: "notice err show cc-unpriced", role: "alert" },
+        el("span", { text: m("cc.unpriced_notice", { v0: unpriced.map(ccModelLabel).join(", ") }) }),
+        " ",
+        el("button", {
+          type: "button",
+          class: "link",
+          text: m("cc.unpriced_open_prices"),
+          onclick: () => {
+            setAdminTab("settings");
+            guard(() => loadPage(false));
+          }
+        })
+      )
+    );
+  const routing = (data.key_routing || []).filter((hint) => hint.provider === ccState.provider && draft.keys[hint.scope]);
+  if (routing.length)
+    notices.push(el("div", { class: "notice show cc-routing-hint", text: m("cc.routing_hint_notice", { v0: routing.length }) }));
+  return notices;
+}
+
 function ccAccountsSection(data, draft) {
+  const provider = ccState.provider;
+  const profile = ccProfile(draft);
   const views = new Map(data.cc.accounts.map((account) => [account.auth_index, account]));
-  const indexes = [...new Set([...data.credentials.map((item) => item.auth_index), ...data.cc.accounts.map((item) => item.auth_index)])];
+  const indexes = [
+    ...new Set([...data.credentials.map((item) => item.auth_index), ...data.cc.accounts.map((item) => item.auth_index)])
+  ].filter((index) => ccAccountProvider(data, draft, index) === provider);
+  const coldStartBlocks = ccEffectiveParam(draft, "cold_start_blocks");
   const rows = indexes.map((index) => {
     const view = views.get(index);
     const settings = draft.accounts[index] || {};
+    const credential = data.credentials.find((item) => item.auth_index === index);
     const update = (patch) => {
       const next = { ...settings, ...patch };
       if (!next.tier) delete next.tier;
       if (next.manual_k === null || next.manual_k === undefined) delete next.manual_k;
-      if (Object.keys(next).length) draft.accounts[index] = next; else delete draft.accounts[index];
+      delete next.provider;
+      if (Object.keys(next).length) {
+        // An account outside every pool keeps its provider in its settings.
+        if (provider !== "claude") next.provider = provider;
+        draft.accounts[index] = next;
+      } else delete draft.accounts[index];
     };
     const deleted = !data.credential_warning && !data.credentials.some((item) => item.auth_index === index);
     const status = deleted
@@ -249,25 +378,41 @@ function ccAccountsSection(data, draft) {
       : !view
         ? ccTag(m("cc.not_estimated"))
         : view.cold_start
-          ? ccTag(m("cc.cold_start"), "warn", m("cc.cold_start_tip", { v0: view.clean_blocks, v1: draft.params.cold_start_blocks }))
+          ? ccTag(m("cc.cold_start"), "warn", m("cc.cold_start_tip", { v0: view.clean_blocks, v1: coldStartBlocks }))
           : ccTag(m("cc.estimated"), "ok");
+    const flags = view
+      ? [
+          view.paused &&
+            ccTag(
+              m("cc.paused_" + (view.pause_reason || "limit_reached")),
+              "warn",
+              m("cc.paused_tip") +
+                (ccWhen(view.paused_since) !== "—" ? DISPLAY_SEPARATOR + m("cc.paused_since", { v0: ccWhen(view.paused_since) }) : "")
+            ),
+          view.segment_window === "7d" && ccTag(m("cc.window_7d_only"), "info", m("cc.window_7d_only_tip")),
+          view.needs_k && ccTag(m("cc.needs_k"), "bad", m("cc.needs_k_tip"))
+        ].filter(Boolean)
+      : [];
     const kGroup = (label, group) =>
       el("div", {
         class: group.valid ? "" : "muted",
         text: m(label, { v0: group.k > 0 ? ccNumber(group.k) : "—", v1: ccNumber(group.gain_5h, 0), v2: ccNumber(group.gain_7d, 0) }),
-        "data-tip": group.valid ? null : m("cc.k_group_insufficient", { v0: draft.params.k_min_weekly_points })
+        "data-tip": group.valid ? null : m("cc.k_group_insufficient", { v0: ccEffectiveParam(draft, "k_min_weekly_points") })
       });
-    const kCell = view
-      ? [
-          kGroup("cc.k_recent_value", view.k_estimate.recent),
-          kGroup("cc.k_old_value", view.k_estimate.old),
-          el("div", {
-            class: "cc-k-final",
-            text: m("cc.k_used_value", { v0: view.k ? ccNumber(view.k) : "—" }) + DISPLAY_SEPARATOR + m("cc.k_source_" + view.k_source),
-            "data-tip": m("cc.k_basis_" + view.k_estimate.basis)
-          })
-        ]
-      : "—";
+    const kCell =
+      view?.segment_window === "7d"
+        ? el("span", { class: "muted", text: m("cc.k_not_needed"), "data-tip": m("cc.window_7d_only_tip") })
+        : view
+          ? [
+              kGroup("cc.k_recent_value", view.k_estimate.recent),
+              kGroup("cc.k_old_value", view.k_estimate.old),
+              el("div", {
+                class: "cc-k-final",
+                text: m("cc.k_used_value", { v0: view.k ? ccNumber(view.k) : "—" }) + DISPLAY_SEPARATOR + m("cc.k_source_" + view.k_source),
+                "data-tip": m("cc.k_basis_" + view.k_estimate.basis)
+              })
+            ]
+          : "—";
     return el(
       "tr",
       {},
@@ -277,10 +422,27 @@ function ccAccountsSection(data, draft) {
         {},
         ccSelect(
           settings.tier || "",
-          [["", m("cc.tier_unset")], ...CC_TIERS.map((tier) => [tier, m("cc.tier_" + tier)])],
+          [
+            ["", m("cc.tier_unset_value", { v0: ccTierLabel(profile.tiers[0]) })],
+            ...profile.tiers.map((tier) => [tier.id, ccTierLabel(tier)])
+          ],
           (value) => update({ tier: value }),
           { "aria-label": m("cc.tier") }
-        )
+        ),
+        credential?.suggested_tier && settings.tier !== credential.suggested_tier &&
+          el("button", {
+            type: "button",
+            class: "link small cc-suggested-tier",
+            text: m("cc.suggested_tier", {
+              v0: ccTierLabel(profile.tiers.find((tier) => tier.id === credential.suggested_tier) || { id: credential.suggested_tier })
+            }),
+            "data-tip": m("cc.suggested_tier_tip", { v0: credential.plan }),
+            onclick: () => {
+              update({ tier: credential.suggested_tier });
+              ccMarkDirty();
+              renderCC();
+            }
+          })
       ),
       el(
         "td",
@@ -292,12 +454,19 @@ function ccAccountsSection(data, draft) {
           "aria-label": m("cc.manual_k")
         })
       ),
-      el("td", {}, status),
+      el("td", {}, el("div", { class: "cc-flags" }, status, ...flags)),
       el("td", {
         text: view ? ccPercent(view.used_5h) + DISPLAY_SLASH + ccPercent(view.used_7d) : "—",
         "data-tip": view ? m("cc.resets_tip", { v0: ccWhen(view.reset_5h), v1: ccWhen(view.reset_7d) }) : null
       }),
-      el("td", { text: view ? (view.five_hour_total_usd > 0 ? ccUSD(view.five_hour_total_usd) : m("cc.unknown")) : "—" }),
+      el("td", {
+        text: view
+          ? view.segment_window === "7d"
+            ? m("cc.not_applicable")
+            : view.five_hour_total_usd > 0 ? ccUSD(view.five_hour_total_usd) : m("cc.unknown")
+          : "—",
+        "data-tip": view?.segment_window === "7d" ? m("cc.window_7d_only_tip") : null
+      }),
       el("td", { text: view ? ccUSD(view.weekly_total_usd) : "—", "data-tip": view ? m("cc.totals_from_" + view.totals_from) : null }),
       el("td", { class: "cc-k" }, kCell),
       el("td", { text: view ? ccUSD(view.remaining_week_usd) + DISPLAY_SLASH + ccUSD(view.remaining_five_hour_usd) : "—" }),
@@ -307,7 +476,7 @@ function ccAccountsSection(data, draft) {
     );
   });
   return ccSection(
-    m("cc.accounts"),
+    m("cc.accounts_value", { v0: ccProviderLabel(provider) }),
     m("cc.accounts_hint"),
     ccTable(
       [
@@ -325,8 +494,34 @@ function ccAccountsSection(data, draft) {
         m("cc.processed_until")
       ],
       rows,
-      m("cc.no_claude_accounts")
+      m("cc.no_provider_accounts", { v0: ccProviderLabel(provider) })
     )
+  );
+}
+
+// The cost the provider's segment rules left out of the segments, by account.
+function ccExcludedSection(data, draft) {
+  const rules = ccProfile(draft)?.segment_rules || {};
+  if (!rules.main_window_only && !rules.exclude_unpriced) return null;
+  const accounts = data.cc.accounts.filter((account) => ccAccountProvider(data, draft, account.auth_index) === ccState.provider);
+  const rows = accounts.map((account) => {
+    const excluded = account.excluded || {};
+    const usd = excluded.usd || {}, requests = excluded.requests || {};
+    const models = Object.entries(excluded.unpriced_models || {});
+    return el(
+      "tr",
+      {},
+      el("td", { text: ccCredentialName(data, account.auth_index) }),
+      el("td", { text: ccUSD(usd.other_limit || 0) + DISPLAY_SEPARATOR + m("cc.requests_value", { v0: requests.other_limit || 0 }) }),
+      el("td", { text: m("cc.requests_value", { v0: requests.unpriced || 0 }) }),
+      el("td", { text: models.length ? models.map(([model, count]) => ccModelLabel(model) + " ×" + count).join(", ") : "—" })
+    );
+  });
+  const total = accounts.reduce((sum, account) => sum + (account.excluded?.usd?.other_limit || 0), 0);
+  return ccSection(
+    m("cc.excluded_title"),
+    m("cc.excluded_hint", { v0: ccUSD(total) }),
+    ccTable([m("cc.account"), m("cc.excluded_other_limit"), m("cc.excluded_unpriced"), m("cc.excluded_unpriced_models")], rows)
   );
 }
 
@@ -338,10 +533,17 @@ function ccNewPoolID(draft) {
 }
 
 function ccPoolsSection(data, draft) {
+  const provider = ccState.provider;
   const statuses = new Map(data.cc.pools.map((pool) => [pool.id, pool]));
-  const cards = draft.pools.map((pool) => {
+  const cards = draft.pools.filter((pool) => ccPoolProvider(pool) === provider).map((pool) => {
     const status = statuses.get(pool.id);
-    const indexes = [...new Set([...data.credentials.map((item) => item.auth_index), ...pool.auth_indexes])];
+    // A pool holds accounts of its provider only.
+    const indexes = [
+      ...new Set([
+        ...data.credentials.filter((item) => (item.provider || "claude") === provider).map((item) => item.auth_index),
+        ...pool.auth_indexes
+      ])
+    ];
     const anchor = pool.auth_indexes.includes(pool.anchor_auth_index) ? pool.anchor_auth_index : pool.auth_indexes[0] || "";
     const accountChoices = indexes.map((index) => {
       const member = pool.auth_indexes.includes(index);
@@ -431,7 +633,9 @@ function ccPoolsSection(data, draft) {
       el(
         "div",
         { class: "cc-checks" },
-        accountChoices.length ? accountChoices : el("span", { class: "muted small", text: m("cc.no_claude_accounts") })
+        accountChoices.length
+          ? accountChoices
+          : el("span", { class: "muted small", text: m("cc.no_provider_accounts", { v0: ccProviderLabel(provider) }) })
       ),
       metrics
     );
@@ -442,9 +646,9 @@ function ccPoolsSection(data, draft) {
     ...cards,
     el("button", {
       type: "button",
-      text: m("cc.add_pool"),
+      text: m("cc.add_pool_value", { v0: ccProviderLabel(provider) }),
       onclick: () => {
-        draft.pools.push({ id: ccNewPoolID(draft), name: "", auth_indexes: [], anchor_auth_index: "" });
+        draft.pools.push({ id: ccNewPoolID(draft), name: "", provider, auth_indexes: [], anchor_auth_index: "" });
         ccMarkDirty();
         renderCC();
       }
@@ -471,6 +675,7 @@ function ccKeyStatus(key, option, settings) {
 }
 
 function ccKeysSection(data, draft) {
+  const provider = ccState.provider;
   const statuses = new Map(data.cc.keys.map((key) => [key.scope, key]));
   const options = [...data.key_options];
   for (const key of data.cc.keys)
@@ -478,8 +683,16 @@ function ccKeysSection(data, draft) {
       options.push({ scope: key.scope, preview: key.preview, label: key.label, deleted: true });
   for (const scope of Object.keys(draft.keys))
     if (!options.some((option) => option.scope === scope)) options.push({ scope, deleted: true });
-  const pools = draft.pools.map((pool) => [pool.id, pool.name || pool.id]);
-  const rows = options.map((option) => {
+  const providerPools = draft.pools.filter((pool) => ccPoolProvider(pool) === provider);
+  const pools = providerPools.map((pool) => [pool.id, pool.name || pool.id]);
+  // A key belongs to one pool; it shows on that pool's provider tab, and an
+  // unassigned key on every tab.
+  const keyProvider = (scope) => {
+    const pool = draft.pools.find((item) => item.id === draft.keys[scope]?.pool_id);
+    return pool ? ccPoolProvider(pool) : null;
+  };
+  const routing = new Map((data.key_routing || []).map((hint) => [hint.scope, hint]));
+  const rows = options.filter((option) => [null, provider].includes(keyProvider(option.scope))).map((option) => {
     const settings = draft.keys[option.scope] || {};
     const status = statuses.get(option.scope);
     const update = (patch) => {
@@ -556,7 +769,23 @@ function ccKeysSection(data, draft) {
         text: status ? ccUSD(status.balance_usd) : "—",
         "data-tip": status ? m("cc.reported_balance_tip", { v0: ccNumber(status.reported_balance_usd, 6) }) : null
       }),
-      el("td", {}, ccKeyStatus(status, option, settings))
+      el(
+        "td",
+        {},
+        el(
+          "div",
+          { class: "cc-flags" },
+          ccKeyStatus(status, option, settings),
+          settings.kind && routing.has(option.scope) &&
+            ccTag(
+              m("cc.routing_hint"),
+              "warn",
+              m(routing.get(option.scope).unrestricted ? "cc.routing_hint_unrestricted_tip" : "cc.routing_hint_other_tip", {
+                v0: ccProviderLabel(provider)
+              })
+            )
+        )
+      )
     );
   });
   return ccSection(
@@ -614,35 +843,66 @@ function ccParamsSection(data, draft) {
       el("span", { class: "muted small", text: m(definition.hint) + DISPLAY_SEPARATOR + m("cc.default_value", { v0: defaultText }) })
     );
   };
-  const tiers = CC_TIERS.map((tier) =>
-    el(
-      "label",
-      { class: "cc-param", for: "cc-param-tier-" + tier },
-      el("span", { class: "cc-param-label", text: m("cc.tier_weekly_default", { v0: m("cc.tier_" + tier) }) }),
-      ccNumberInput(
-        params.tier_weekly_usd[tier],
-        (next) => { params.tier_weekly_usd[tier] = next === null ? defaults.tier_weekly_usd[tier] : next; },
-        { id: "cc-param-tier-" + tier, min: "0" }
+  const provider = ccState.provider;
+  const profile = ccProfile(draft);
+  const defaultProfile = data.cc.default_providers?.[provider] || profile;
+  const tiers = profile.tiers.flatMap((tier, index) => {
+    const fallback = defaultProfile.tiers.find((item) => item.id === tier.id) || tier;
+    const id = "cc-tier-" + provider + "-" + tier.id;
+    return [
+      el(
+        "label",
+        { class: "cc-param", for: id },
+        el("span", { class: "cc-param-label", text: m("cc.tier_weekly_default", { v0: ccTierLabel(tier) }) }),
+        ccNumberInput(
+          tier.weekly_usd,
+          (next) => { profile.tiers[index].weekly_usd = next === null ? fallback.weekly_usd : next; },
+          { id, min: "0" }
+        ),
+        el("span", { class: "muted small", text: m("cc.default_value", { v0: ccUSD(fallback.weekly_usd) }) })
       ),
-      el("span", { class: "muted small", text: m("cc.default_value", { v0: ccUSD(defaults.tier_weekly_usd[tier]) }) })
-    )
-  );
-  const tierK = CC_TIERS.map((tier) =>
-    el(
+      el(
+        "label",
+        { class: "cc-param", for: id + "-k" },
+        el("span", { class: "cc-param-label", text: m("cc.tier_k_default", { v0: ccTierLabel(tier) }) }),
+        ccNumberInput(
+          tier.k,
+          (next) => { profile.tiers[index].k = next; },
+          { id: id + "-k", min: "1", max: "100", placeholder: m("cc.tier_k_unset") }
+        ),
+        el("span", {
+          class: "muted small",
+          text:
+            m("cc.hint_tier_k") + DISPLAY_SEPARATOR +
+            m("cc.default_value", { v0: fallback.k === null || fallback.k === undefined ? m("cc.tier_k_unset") : ccNumber(fallback.k) })
+        })
+      )
+    ];
+  });
+  // Parameters this provider's accounts may override; empty keeps the global value.
+  const overrides = CC_PARAM_FIELDS.filter((definition) => CC_PROVIDER_OVERRIDES.includes(definition.name)).map((definition) => {
+    profile.params ||= {};
+    const value = profile.params[definition.name];
+    const id = "cc-override-" + provider + "-" + definition.name;
+    const global = params[definition.name];
+    return el(
       "label",
-      { class: "cc-param", for: "cc-param-tier-k-" + tier },
-      el("span", { class: "cc-param-label", text: m("cc.tier_k_default", { v0: m("cc.tier_" + tier) }) }),
+      { class: "cc-param", for: id },
+      el("span", { class: "cc-param-label", text: m(definition.label) }),
       ccNumberInput(
-        params.tier_k[tier],
-        (next) => { params.tier_k[tier] = next === null ? defaults.tier_k[tier] : next; },
-        { id: "cc-param-tier-k-" + tier, min: "1", max: "100" }
+        value === undefined || value === null ? null : definition.percent ? Math.round(value * 10000) / 100 : value,
+        (next) => {
+          if (next === null) delete profile.params[definition.name];
+          else profile.params[definition.name] = definition.percent ? next / 100 : next;
+        },
+        { id, step: definition.step || "any", placeholder: definition.percent ? ccNumber(global * 100) + "%" : ccNumber(global) }
       ),
-      el("span", {
-        class: "muted small",
-        text: m("cc.hint_tier_k") + DISPLAY_SEPARATOR + m("cc.default_value", { v0: ccNumber(defaults.tier_k[tier]) })
-      })
-    )
-  );
+      el("span", { class: "muted small", text: m("cc.override_hint") })
+    );
+  });
+  const rules = profile.segment_rules || {};
+  const ruleLines = ["main_window_only", "exclude_unpriced", "pause_when_exhausted"].filter((rule) => rules[rule])
+    .map((rule) => el("li", { text: m("cc.rule_" + rule) }));
   const unloaded = el(
     "label",
     { class: "toggle-filter cc-param-switch" },
@@ -662,13 +922,22 @@ function ccParamsSection(data, draft) {
   return ccSection(
     m("cc.parameters"),
     m("cc.parameters_hint"),
-    el("div", { class: "cc-params" }, CC_PARAM_FIELDS.map(field), tiers, tierK),
+    el("h4", { text: m("cc.provider_parameters", { v0: ccProviderLabel(provider) }) }),
+    el("p", { class: "muted small", text: m("cc.provider_parameters_hint") }),
+    el("div", { class: "cc-params cc-provider-params" }, tiers, overrides),
+    ruleLines.length
+      ? el("div", {}, el("p", { class: "muted small", text: m("cc.rules_title") }), el("ul", { class: "muted small cc-rules" }, ruleLines))
+      : null,
+    el("h4", { text: m("cc.global_parameters") }),
+    el("div", { class: "cc-params" }, CC_PARAM_FIELDS.map(field)),
     el("div", { class: "cc-param-toggle" }, unloaded, el("p", { class: "muted small", text: m("cc.hint_refuse_unloaded") }))
   );
 }
 
-function ccBlocksSection(data) {
-  const accounts = data.cc.accounts.filter((account) => account.recent_blocks.length);
+function ccBlocksSection(data, draft) {
+  const accounts = data.cc.accounts.filter(
+    (account) => account.recent_blocks.length && ccAccountProvider(data, draft, account.auth_index) === ccState.provider
+  );
   if (!accounts.length) return ccSection(m("cc.recent_blocks"), m("cc.recent_blocks_empty"));
   return ccSection(
     m("cc.recent_blocks"),
@@ -713,7 +982,7 @@ function ccBlocksSection(data) {
   );
 }
 
-// The CC split's estimate of a pooled Claude account on the auth files page and drawer.
+// The subscription split's estimate of a pooled account on the auth files page and drawer.
 function renderCCAuthSummary(cc, heading = true) {
   const item = (label, value, tooltip) =>
     el(
@@ -729,7 +998,8 @@ function renderCCAuthSummary(cc, heading = true) {
         "data-tip": m("cc.cold_start_tip", { v0: cc.clean_blocks, v1: cc.cold_start_blocks })
       })
     : el("span", { class: "tag ok", text: m("cc.estimated") });
-  const k = cc.k ? ccNumber(cc.k) + DISPLAY_SEPARATOR + m("cc.k_origin_" + cc.k_source) : "—";
+  const weeklyWindow = cc.segment_window === "7d";
+  const k = weeklyWindow ? m("cc.k_not_needed") : cc.k ? ccNumber(cc.k) + DISPLAY_SEPARATOR + m("cc.k_origin_" + cc.k_source) : "—";
   return el(
     "div",
     { class: "cc-auth-summary" },
@@ -738,6 +1008,9 @@ function renderCCAuthSummary(cc, heading = true) {
       { class: "cc-auth-head" },
       heading && el("span", { class: "cc-auth-title", text: m("cc.auth_estimate_title") }),
       status,
+      cc.paused && el("span", { class: "tag warn", text: m("cc.paused_limit_reached"), "data-tip": m("cc.paused_tip") }),
+      weeklyWindow && el("span", { class: "tag info", text: m("cc.window_7d_only"), "data-tip": m("cc.window_7d_only_tip") }),
+      cc.needs_k && el("span", { class: "tag bad", text: m("cc.needs_k"), "data-tip": m("cc.needs_k_tip") }),
       el("span", { class: "muted", text: cc.pools.join(", ") })
     ),
     el(
@@ -745,11 +1018,11 @@ function renderCCAuthSummary(cc, heading = true) {
       { class: "cc-auth-grid" },
       item(
         m("cc.total_5h"),
-        cc.five_hour_total_usd > 0 ? ccUSD(cc.five_hour_total_usd) : m("cc.unknown"),
-        cc.five_hour_total_usd > 0 ? "" : m("cc.five_hour_unknown_tip")
+        weeklyWindow ? m("cc.not_applicable") : cc.five_hour_total_usd > 0 ? ccUSD(cc.five_hour_total_usd) : m("cc.unknown"),
+        weeklyWindow ? m("cc.window_7d_only_tip") : cc.five_hour_total_usd > 0 ? "" : m("cc.five_hour_unknown_tip")
       ),
       item(m("cc.total_week"), ccUSD(cc.weekly_total_usd), m("cc.totals_from_" + cc.totals_from)),
-      item(m("cc.k"), k, cc.k ? "" : m("cc.k_basis_none")),
+      item(m("cc.k"), k, weeklyWindow ? m("cc.window_7d_only_tip") : cc.k ? "" : m("cc.k_basis_none")),
       item(
         m("cc.remaining_week_5h"),
         ccUSD(cc.remaining_week_usd) + DISPLAY_SLASH + ccUSD(cc.remaining_five_hour_usd),

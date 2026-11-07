@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 func (a *App) openAuthQuotaClient(callbackID string, file hostAuthFile) (*authQuotaClient, error) {

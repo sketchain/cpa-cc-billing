@@ -520,7 +520,7 @@ async function fetchConfiguredAPIKeys() {
 
 // The plugin filters /v1/models by the key's routing rules; management lists every model.
 async function fetchModels(account, key) {
-  const headers = account ? {} : { "X-CPA-CC-Billing-Models": "all" };
+  const headers = account ? {} : { "X-CPA-Super-Billing-Models": "all" };
   const result = await api("GET", "/v1/models", null, { key, headers, auxiliaryCredential: !account });
   const rows = result.data;
   const models = [...new Set(rows.map((row) => row.id))].sort(compareModelId);

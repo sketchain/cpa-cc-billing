@@ -1,21 +1,21 @@
 <div align="center">
-  <h1>CPA CC Billing</h1>
-  <p><strong>A <a href="https://github.com/router-for-me/CLIProxyAPI">CLIProxyAPI</a> plugin that splits one Claude subscription's quota between downstream API keys.</strong></p>
+  <h1>CPA Super Billing</h1>
+  <p><strong>A <a href="https://github.com/router-for-me/CLIProxyAPI">CLIProxyAPI</a> plugin that splits Claude and ChatGPT (Codex) subscription quotas between downstream API keys.</strong></p>
   <p>
-    <a href="https://github.com/sketchain/cpa-cc-billing/releases/latest"><img src="https://img.shields.io/github/v/release/sketchain/cpa-cc-billing?label=release" alt="Latest release"></a>
+    <a href="https://github.com/sketchain/cpa-super-billing/releases/latest"><img src="https://img.shields.io/github/v/release/sketchain/cpa-super-billing?label=release" alt="Latest release"></a>
     <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platforms: Windows, macOS, and Linux">
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
   </p>
   <p><strong>English</strong> · <a href="./README.md">简体中文</a></p>
 </div>
 
-A fork of [cpa-key-billing](https://github.com/haowang02/cpa-plugin-key-billing). All of its billing, quota, concurrency and routing features remain; this fork adds the CC split.
+A fork of [cpa-key-billing](https://github.com/haowang02/cpa-plugin-key-billing). All of its billing, quota, concurrency and routing features remain; this fork adds the subscription split for Claude and ChatGPT Team (through CPA's Codex channel) accounts.
 
-<img src="images/example.png" alt="CPA CC Billing dashboard" width="100%" />
+<img src="images/example.png" alt="CPA Super Billing dashboard" width="100%" />
 
 ## Features
 
-- **CC split**: fixed keys get a fixed weekly amount (for example $100 a week), while remainder keys may only use what the account has left after reserving the fixed keys' unused amounts (weekly and 5-hour reservations).
+- **Subscription split**: fixed keys get a fixed weekly amount (for example $100 a week), while remainder keys may only use what the account has left after reserving the fixed keys' unused amounts (weekly and 5-hour reservations).
 - Estimates each Claude account's total in USD only from passively observed utilization headers, never polling upstream, and filters out usage of the account outside CPA.
 - A consumption forecast, a fixed key simulation and per-key usage charts, to judge whether a pool can take another key.
 - A balance endpoint for new-api Advanced Custom channels.
@@ -55,14 +55,30 @@ flowchart TB
     F --> G["Normalize tokens and bill<br/>Update quota-window spending"]
 ```
 
-## CC split
+## Subscription split
+
+The **Subscription split** page has a Claude and a ChatGPT tab; each shows that provider's accounts, pools, key assignments, forecast, trend, simulation and model weights. The management routes stay under `/cc/...`.
 
 ### Concepts
 
-- **Account**: one Claude OAuth credential in CPA (by `auth_index`), estimated on its own.
-- **Pool**: a set of accounts that fixed and remainder keys share; its remaining capacity is the sum of its accounts'. An anchor account, chosen with **Set as anchor** on the page, anchors the pool's weekly cycles and 5-hour window (pools saved before take their first account). An account can belong to only one pool; saving checks it.
-- **Fixed key**: bound, on the API Key page, to a subscription plan with a **7-day amount window**; that amount is its weekly quota. **Give each fixed key a plan of its own**: aligning cycles changes the plan itself, which affects every key bound to it. Fixed keys cannot use a **shared quota** plan: every key of such a plan sees the whole pool's quota and usage, so per-key reservations would count the pool repeatedly. Saving the CC settings, binding a fixed key to a shared plan, and switching a fixed key's plan to a shared quota are all refused.
+- **Account**: one Claude or ChatGPT (Codex) OAuth credential in CPA (by `auth_index`), estimated on its own.
+- **Pool**: a set of accounts of one provider (saving checks it) that fixed and remainder keys share; its remaining capacity is the sum of its accounts'. An anchor account, chosen with **Set as anchor** on the page, anchors the pool's weekly cycles and 5-hour window (pools saved before take their first account). An account can belong to only one pool; saving checks it.
+- **Fixed key**: bound, on the API Key page, to a subscription plan with a **7-day amount window**; that amount is its weekly quota. **Give each fixed key a plan of its own**: aligning cycles changes the plan itself, which affects every key bound to it. Fixed keys cannot use a **shared quota** plan: every key of such a plan sees the whole pool's quota and usage, so per-key reservations would count the pool repeatedly. Saving the split settings, binding a fixed key to a shared plan, and switching a fixed key's plan to a shared quota are all refused.
 - **Remainder key**: may only use what the pool has left after the fixed keys' reservations, optionally under its own weekly cap.
+
+### ChatGPT (Codex) accounts
+
+ChatGPT Team accounts, used through CPA's Codex channel, are split like Claude accounts (fixed and remainder keys, weekly and 5-hour reservations, the balance endpoint), with these differences:
+
+- **Signals**: the `Used-Percent`, `Window-Minutes` and `Reset-At` of the `X-Codex-Primary-*` (5-hour, 300 minutes) and `X-Codex-Secondary-*` (7-day, 10080 minutes) response headers; for WebSocket requests CPA turns `codex.rate_limits` events into the same headers. Percentages may have decimals: a segment ends where the utilization crosses a whole point, and a rise across several points is one segment.
+- **Segment window per account**: an account whose reports have a 5-hour window is segmented on it and k converts its total to the weekly one. An account with only the 7-day window is segmented on that window, so 1% is 1% of the weekly total, no k is needed, and it has no 5-hour reservation (marked **7-day window only**). If a 5-hour window appears later, its segments restart on it.
+- **Tier and k**: one tier, Team, with a $60 weekly default and **no default k**. A manual k comes first, then the estimated one; without either the plugin does not guess: the 5-hour reservation is off, the weekly reservation still applies (on the tier default or the estimated weekly total), and the page asks for a k. An account whose `X-Codex-Plan-Type` is `team` gets Team suggested.
+- **Main limit only**: a request's cost counts toward segments only when its own report carries a main window. Requests reporting only an additional pool (such as Spark), code review or image windows, or whose `X-Codex-Active-Limit` is not premium, and requests without a report do not count; the page totals them under **Cost left out of the estimates**.
+- **Used up and credits**: while a report shows a window used up (`X-Codex-Limit-Reached`, or 100%) or the credit balance falling, the account's segments pause (its last estimate stays, marked **Paused**) and resume afterwards; no segment includes that period's cost.
+- **Unpriced models**: with `allow_unpriced_models`, unpriced requests are recorded at $0; they stay out of segments and the page lists their models with a link to pricing.
+- **Routing hint**: a key whose routing rules do not keep it on its pool's provider is flagged **Routing not limited** in the keys table; nothing is refused.
+
+The parameters section edits each provider's tiers (weekly total and default k) and can override the block gap, sliding window width, k's minimum 7-day gain, cold start blocks and safety factor per provider (empty keeps the global value). Model quota weights are per provider too.
 
 ### Estimation
 
@@ -84,7 +100,7 @@ On synthetic data (whole-percent reports, concurrency, sporadic and sustained ou
 - A remainder key is admitted only when `Σ R_week > P_week` and, when 5-hour reservations are on, `Σ R_5h > Σ 5-hour reservations`. Refusals use the plugin's usual `429 rate_limit_error`; the message names the weekly reservation, the 5-hour reservation or the key's own weekly cap, and `Retry-After` points at that window's reset.
 - Each refusal is logged once per key, reason and window reset, with the key, the reason (`weekly_reserve`, `five_hour_reserve`, `weekly_cap`, `pool_unavailable` or `not_loaded`) and the estimate that decided it.
 - Fixed keys are only limited by their plan.
-- Admission only reads an in-memory snapshot: keys outside every pool are admitted without touching the estimator; pooled keys combine the snapshot's totals with live utilization and live costs from usage callbacks, with no database query and no wait for a refresh. Refreshes run synchronously at startup, from usage callbacks (after the request, at most once a minute, skipped while one runs) and from the page's buttons; the plugin starts no background thread. When the settings are loaded but no estimate snapshot exists yet, remainder keys get 429 with reason `not_loaded` while fixed keys and keys outside every pool are admitted; the **Refuse remainder keys while estimates are not loaded** parameter (on by default) turns this off, and the CC page shows that the estimates are not loaded. Until even the settings load, every request is admitted (logged once). The balance endpoint returns 503 until the estimates load. Fixed keys' alignment results are cached; when the cache does not hold (first request, plan change, wait over), admission writes the plan's new anchor once.
+- Admission only reads an in-memory snapshot: keys outside every pool are admitted without touching the estimator; pooled keys combine the snapshot's totals with live utilization and live costs from usage callbacks, with no database query and no wait for a refresh. Refreshes run synchronously at startup, from usage callbacks (after the request, at most once a minute, skipped while one runs) and from the page's buttons; the plugin starts no background thread. When the settings are loaded but no estimate snapshot exists yet, remainder keys get 429 with reason `not_loaded` while fixed keys and keys outside every pool are admitted; the **Refuse remainder keys while estimates are not loaded** parameter (on by default) turns this off, and the subscription split page shows that the estimates are not loaded. Until even the settings load, every request is admitted (logged once). The balance endpoint returns 503 until the estimates load. Fixed keys' alignment results are cached; when the cache does not hold (first request, plan change, wait over), admission writes the plan's new anchor once.
 
 ### Fixed key cycles
 
@@ -92,11 +108,11 @@ The plugin switches the 7-day window of a fixed key's plan to a shared cycle anc
 
 ### Settings
 
-Everything is set on the **CC split** page and stored in the database: segment retention (365 days, independent of request events), block gap (5 minutes), window width (8%), reference (global), suspicious threshold (20%), exclusion vote (50%), weight exponent p (2), recent period and share (14 days, 90%), weekly gain for k (10 points), cold start blocks (20), tier defaults ($250 / $1250 / $2500), tier default k (8 each), refusing remainder keys while estimates are not loaded (on), safety factor (90%), each account's tier and manual k, each pool's accounts and anchor, and each key's type, pool, 5-hour share override or weekly cap. Fixed keys that share a plan must be in the same pool.
+Everything is set on the **Subscription split** page and stored in the database: segment retention (365 days, independent of request events), block gap (5 minutes), window width (8%), reference (global), suspicious threshold (20%), exclusion vote (50%), weight exponent p (2), recent period and share (14 days, 90%), weekly gain for k (10 points), cold start blocks (20), tier defaults ($250 / $1250 / $2500), tier default k (8 each), refusing remainder keys while estimates are not loaded (on), safety factor (90%), each account's tier and manual k, each pool's accounts and anchor, and each key's type, pool, 5-hour share override or weekly cap. Fixed keys that share a plan must be in the same pool.
 
 ### Quota trend
 
-The CC split page draws two daily charts for each pooled account, splitting days in the browser's time zone:
+The subscription split page draws two daily charts for each pooled account, splitting days in the browser's time zone:
 
 - Daily k: the day's k = its summed 5-hour gain / summed weekly gain (no k on a day without weekly gain), the rolling 7-day k (fewer days at the start), and a reference line for the effective k labelled auto, manual or tier default. Days whose weekly gain is below **k needs 7-day gain** (`k_min_weekly_points`) show as hollow points: their k is imprecise.
 - Daily gains and projected weekly total: bars of the day's 5-hour and weekly gains, with the projected weekly total = k × $/1% × 100 on the right axis. $/1% is the cost over the gain of the day's segments, using only the segments the estimate kept; while the estimates are not loaded, no exclusion result exists and every stored segment counts. When the day's k is missing or imprecise the rolling k is used (diamond points).
@@ -105,7 +121,7 @@ Hovering shows the day's two gains, segments, cost, daily k, rolling k, $/1% and
 
 ### Model quota weights
 
-Some models may use more subscription quota per USD than their API price suggests. On the CC split page, mark such models as **test items** (several names of one model can form one item); every other model is baseline with a weight of 1.
+Some models may use more subscription quota per USD than their API price suggests. On the subscription split page, mark such models as **test items** (several names of one model can form one item); every other model is baseline with a weight of 1.
 
 - **Per-model split**: every 1% segment also records its cost by billing model. Segments recorded before the upgrade have no split and count as baseline; **Rebuild from history** recreates every segment with its split from the retained request records (segments older than the request retention cannot be split).
 - **Historical estimate**: each segment's gain ≈ s × (baseline cost + Σ mᵢ × item i's cost), with an s per account and the multipliers mᵢ shared. Segments are cut into chunks of about 30 minutes, ending only at rises and by elapsed time rather than gain (cutting at a fixed gain moves the rounding error into the costs and biases the multipliers towards 1), and fitted by weighted least squares with the totals' time weighting (the last 14 days count 90%). The result gives each multiplier, its standard error and 95% interval, the segments used and the share range.
@@ -119,7 +135,7 @@ The multipliers are computed during refreshes into the snapshot; admission only 
 
 ### Consumption forecast
 
-Below the account table, the CC split page lists for each pool and account when the 5-hour and weekly usage will reach 100%, and when remainder keys will be refused by the weekly or 5-hour reservation (when the pool's remaining R minus the reservation P reaches 0).
+Below the account table, the subscription split page lists for each pool and account when the 5-hour and weekly usage will reach 100%, and when remainder keys will be refused by the weekly or 5-hour reservation (when the pool's remaining R minus the reservation P reaches 0).
 
 - **Rate**: by default the last hour for the 5-hour window and the last 24 hours for the week, adjustable on the page (5–300 minutes / 1–168 hours, remembered in this browser only). The rise of the accounts' utilization readings comes first (a window that reset within the range starts from 0%, and only readings of the current window count); the pool keys' live spend converted with the estimated $/1% is shown beside it and used for accounts without readings.
 - **Basis**: with **Use model multipliers in estimates** on, capacity is in baseline USD while key spend is billed at the price table, so the spend is converted with the effective multipliers first; a model whose price multiplier already equals its quota multiplier is not converted again. The tooltip names the basis used.
@@ -137,7 +153,7 @@ Choose a pool and add hypothetical fixed keys (weekly amount, optional 5-hour sh
 
 ### Key usage
 
-Each pool has a daily chart of its keys' cost (stacked bars at billed prices), with remainder keys' CC refusals of the day as dashed lines on the right axis (the tooltip splits them by reason). Fixed keys also get a chart by plan cycle: what each cycle used and forfeited (weekly amount − used, settled when the cycle ends; a running cycle shows what is left, not forfeited). Days follow the browser's time zone, and the range switches between 7, 14 and 30 days and everything.
+Each pool has a daily chart of its keys' cost (stacked bars at billed prices), with remainder keys' split refusals of the day as dashed lines on the right axis (the tooltip splits them by reason). Fixed keys also get a chart by plan cycle: what each cycle used and forfeited (weekly amount − used, settled when the cycle ends; a running cycle shows what is left, not forfeited). Days follow the browser's time zone, and the range switches between 7, 14 and 30 days and everything.
 
 Refusals are counted by key, hour and reason in the `cc_block_counts` table (CC table format version 4). Admission runs on the request path, so it only adds to memory; the counts are written in one transaction by the next estimate refresh or when the usage charts are opened. Plugin log lines stay deduplicated as before: one per key, reason and window.
 
@@ -145,38 +161,57 @@ Refusals are counted by key, hour and reason in the `cc_block_counts` table (CC 
 
 ### Auth files page
 
-For Claude accounts in a CC pool, the auth files page (with **Quota estimate** on) and its detail drawer show the CC split's result instead of the estimate scaled by usage × 100 / used percent: the 5-hour and weekly totals, k with its source (auto, manual or tier default), R week / R 5h and the cold start state. They come from the latest estimate snapshot; opening the page does not refresh the estimates. Other accounts are unchanged.
+For Claude accounts in a pool, the auth files page (with **Quota estimate** on) and its detail drawer show the subscription split's result instead of the estimate scaled by usage × 100 / used percent: the 5-hour and weekly totals, k with its source (auto, manual or tier default), R week / R 5h and the cold start state. They come from the latest estimate snapshot; opening the page does not refresh the estimates. Other accounts are unchanged.
 
 ### Balance endpoint for new-api
 
 ```text
-GET /v0/resource/plugins/cpa-cc-billing/balance
+GET /v0/resource/plugins/cpa-super-billing/balance
 Authorization: Bearer <downstream API key>
 ```
 
-It returns `{"object":"credit_summary","total_available": <USD>}` for the week only: weekly amount minus usage for a fixed key, `Σ R_week − P_week` for a remainder key (capped by its own cap). Zero or less is reported as `1` on purpose, because new-api disables a channel whose balance is zero or less; the CC split page shows the actual value next to the reported one. A remainder key's balance is the whole pool's shared balance: several remainder keys of one pool each report the same amount, which must not be added up. Keys outside every pool get 404, unknown keys 401.
+It returns `{"object":"credit_summary","total_available": <USD>}` for the week only: weekly amount minus usage for a fixed key, `Σ R_week − P_week` for a remainder key (capped by its own cap). Zero or less is reported as `1` on purpose, because new-api disables a channel whose balance is zero or less; the subscription split page shows the actual value next to the reported one. A remainder key's balance is the whole pool's shared balance: several remainder keys of one pool each report the same amount, which must not be added up. Keys outside every pool get 404, unknown keys 401.
 
-In new-api, create an **Advanced Custom** channel with the CPA address as Base URL and the downstream key as its key, and add a balance route whose `incoming_path` is `/v1/dashboard/billing/credit_grants` (the path new-api queries for balances) and whose `upstream_path` is `/v0/resource/plugins/cpa-cc-billing/balance`, with no converter and the default `Authorization: Bearer` authentication:
+In new-api, create an **Advanced Custom** channel with the CPA address as Base URL and the downstream key as its key, and add a balance route whose `incoming_path` is `/v1/dashboard/billing/credit_grants` (the path new-api queries for balances) and whose `upstream_path` is `/v0/resource/plugins/cpa-super-billing/balance`, with no converter and the default `Authorization: Bearer` authentication:
 
 ```json
 {
   "advanced_routes": [
-    { "incoming_path": "/v1/dashboard/billing/credit_grants", "upstream_path": "/v0/resource/plugins/cpa-cc-billing/balance", "converter": "none" }
+    { "incoming_path": "/v1/dashboard/billing/credit_grants", "upstream_path": "/v0/resource/plugins/cpa-super-billing/balance", "converter": "none" }
   ]
 }
 ```
 
 ### Price list import
 
-Use **Import JSON** on the model pricing card, or `POST /v0/management/plugins/cpa-cc-billing/prices/import`. The file is an array or `{"models": [...]}` of entries with `name`, `aliases`, `input`, `output`, `cache_read` and `cache_write` in USD per million tokens. The name and every alias become custom prices; other fields, such as tier notes, are ignored.
+Use **Import JSON** on the model pricing card, or `POST /v0/management/plugins/cpa-super-billing/prices/import`. The file is an array or `{"models": [...]}` of entries with `name`, `aliases`, `input`, `output`, `cache_read` and `cache_write` in USD per million tokens. The name and every alias become custom prices; other fields, such as tier notes, are ignored.
+
+## Migrating from cpa-cc-billing
+
+From v0.3.0 the plugin is named `cpa-super-billing`. CLIProxyAPI identifies a plugin by its library file name, so the rename installs a new plugin: its configuration, store source and balance path have to be changed once by hand. The database is adopted automatically.
+
+1. Stop CLIProxyAPI (with Docker Compose, stop the `cli-proxy-api` service).
+2. Back up `plugins/cpa-cc-billing-state-v1.db` with its `-wal` and `-shm` files if present.
+3. Delete every `cpa-cc-billing*.so` (`.dll` on Windows, `.dylib` on macOS) from the `plugins` directory and its per-platform subdirectories, then add the new `cpa-super-billing*.so`.
+4. In `config.yaml`, rename the whole `plugins.configs.cpa-cc-billing` entry to `plugins.configs.cpa-super-billing`, keeping its settings, including any `store.version` or `store.release-tag` pin; a pinned version must name the new plugin's version.
+5. If `plugins.store-sources` lists the old repository's `registry.json`, change it to `https://raw.githubusercontent.com/sketchain/cpa-super-billing/main/registry.json`.
+6. In each new-api channel's balance route, change `upstream_path` from `/v0/resource/plugins/cpa-cc-billing/balance` to `/v0/resource/plugins/cpa-super-billing/balance`. The management page moves to `/v0/resource/plugins/cpa-super-billing/ui`.
+7. Start CLIProxyAPI.
+
+> [!WARNING]
+> Never leave both libraries in the `plugins` directory. CLIProxyAPI loads them as two plugins, so every request would be intercepted and billed twice.
+
+Database: with `state_file` unset, the plugin uses `plugins/cpa-super-billing-state-v1.db`. When that file does not exist yet but `plugins/cpa-cc-billing-state-v1.db` does, the plugin copies the old database in full with SQLite's `VACUUM INTO`, as it does for the automatic backup before migrations, checks the copy, opens it, and reports the copy in the plugin log and on the **Subscription split** page. The old database is left untouched; delete it (with its `-wal` and `-shm` files) once everything checks out, and the notice disappears. If the copy fails, the plugin does not start and the log says why; you can also point `state_file` at the old file to keep using it. An explicit `state_file` is opened as configured, without a copy.
+
+Credentials, theme, language and view preferences saved in the browser are copied from the old name the first time the new page opens.
 
 ## Migrating from cpa-key-billing
 
 1. Stop CLIProxyAPI and back up `plugins/cpa-key-billing-state-v1.db` with its `-wal` and `-shm` files if present.
-2. Copy it to `plugins/cpa-cc-billing-state-v1.db` (and the `-wal`/`-shm` files to the same new prefix).
-3. Remove the old plugin library and its `plugins.configs.cpa-key-billing` entry (running both would refuse and bill twice), then install this plugin with a `plugins.configs.cpa-cc-billing` entry.
+2. Copy it to `plugins/cpa-super-billing-state-v1.db` (and the `-wal`/`-shm` files to the same new prefix).
+3. Remove the old plugin library and its `plugins.configs.cpa-key-billing` entry (running both would refuse and bill twice), then install this plugin with a `plugins.configs.cpa-super-billing` entry.
 4. Start CLIProxyAPI. Keys, plans, routes, prices and request history are kept; the CC tables (`cc_meta`, `cc_segments`, `cc_streams`, `cc_k_buckets`) are created automatically. The billing schema version is unchanged, so the original plugin can still open the file.
-5. On the **CC split** page, choose account tiers, create a pool and assign keys. Segments are built from the retained request history right away.
+5. On the **Subscription split** page, choose account tiers, create a pool and assign keys. Segments are built from the retained request history right away.
 
 ## Requirements
 
@@ -190,23 +225,23 @@ Run the installer from your CLIProxyAPI directory.
 On macOS or Linux:
 
 ```sh
-curl -LsSf https://raw.githubusercontent.com/sketchain/cpa-cc-billing/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/sketchain/cpa-super-billing/main/install.sh | sh
 ```
 
 On Windows, stop CLIProxyAPI first, then run this in PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/sketchain/cpa-cc-billing/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/sketchain/cpa-super-billing/main/install.ps1 | iex
 ```
 
 The installer places the plugin in `plugins/` under the current directory. Restart CLIProxyAPI after installing or upgrading.
 
-For manual installation, download the archive for your platform from [Releases](https://github.com/sketchain/cpa-cc-billing/releases/latest), then extract the library into CLIProxyAPI’s `plugins/` directory:
+For manual installation, download the archive for your platform from [Releases](https://github.com/sketchain/cpa-super-billing/releases/latest), then extract the library into CLIProxyAPI’s `plugins/` directory:
 
 ```text
-plugins/cpa-cc-billing.so       # Linux
-plugins/cpa-cc-billing.dylib    # macOS
-plugins/cpa-cc-billing.dll      # Windows
+plugins/cpa-super-billing.so       # Linux
+plugins/cpa-super-billing.dylib    # macOS
+plugins/cpa-super-billing.dll      # Windows
 ```
 
 ## Configuration
@@ -218,7 +253,7 @@ plugins:
   enabled: true
   dir: "plugins"
   configs:
-    cpa-cc-billing:
+    cpa-super-billing:
       enabled: true
       priority: 100 # Plugin scheduling priority; higher values take precedence
       debug: false # Include routing and reference-price matching in debug logs
@@ -228,7 +263,7 @@ plugins:
       mask_api_key_view_emails: false # Mask email addresses in API key account views
       allow_api_key_quota_reset: false # Allow API key users to reset accessible Codex and Claude auth file quotas using upstream resets
       request_event_retention_days: 365 # Retention in days for request events and their associated errors, a positive integer
-      state_file: "plugins/cpa-cc-billing-state-v1.db"
+      state_file: "plugins/cpa-super-billing-state-v1.db"
       routing:
         strategy: "round-robin" # round-robin, weighted-round-robin, fill-first
         session-affinity: false # Reuse an available upstream credential for the same session
@@ -247,14 +282,14 @@ For initial selections or invalid session bindings, the plugin uses the highest 
 > - Databases of cpa-key-billing v1.0.0 or later can be used directly; see [Migrating from cpa-key-billing](#migrating-from-cpa-key-billing).
 > - JSON and SQLite files from cpa-key-billing v0.8.4 or earlier cannot be migrated. Point `state_file` to a new file instead.
 
-Restart CLIProxyAPI and open **CPA CC Billing** in the management panel. Review model pricing, create subscription plans, and bind the API keys whose quotas you want to enforce.
+Restart CLIProxyAPI and open **CPA Super Billing** in the management panel. Review model pricing, create subscription plans, and bind the API keys whose quotas you want to enforce.
 
 ## Upgrading and database recovery
 
 ### Before upgrading
 
 1. Stop CLIProxyAPI (with Docker Compose, stop the `cli-proxy-api` service).
-2. Back up the database `state_file` points to (by default `plugins/cpa-cc-billing-state-v1.db`) together with its `-wal` and `-shm` files if present. Copy all three after stopping the service: the `.db` file alone can miss the most recent writes.
+2. Back up the database `state_file` points to (by default `plugins/cpa-super-billing-state-v1.db`) together with its `-wal` and `-shm` files if present. Copy all three after stopping the service: the `.db` file alone can miss the most recent writes.
 3. Replace the plugin and start CLIProxyAPI.
 
 To return to an older plugin version, first restore the backup taken before upgrading: older versions cannot open a database a newer version has migrated.
@@ -264,7 +299,7 @@ To return to an older plugin version, first restore the backup taken before upgr
 When the plugin opens a database whose structure needs upgrading (the billing tables' `PRAGMA user_version` or the CC tables' `cc_meta` `schema_version`), it first copies the whole database, including what its write-ahead log holds, into the same directory with SQLite's `VACUUM INTO`, checks that the copy opens intact, and only then migrates:
 
 ```text
-plugins/cpa-cc-billing-state-v1.db.bak-u24-to-u25-cc4-20261107T120000
+plugins/cpa-super-billing-state-v1.db.bak-u24-to-u25-cc4-20261107T120000
 ```
 
 The name carries the old and new billing versions, the old and new CC versions (one number when unchanged) and the backup time in UTC. Backups have mode `600`; only the newest three are kept and older ones are removed. No backup is taken when nothing needs migrating. The plugin log records the path of each backup.
@@ -280,23 +315,23 @@ If registration fails with `malformed database schema`, `database disk image is 
 3. Otherwise salvage the damaged file with sqlite3 and put the recovered file in its place (again deleting the old `-wal` and `-shm`):
 
    ```sh
-   sqlite3 plugins/cpa-cc-billing-state-v1.db ".recover" | sqlite3 plugins/cpa-cc-billing-state-v1.db.recovered
+   sqlite3 plugins/cpa-super-billing-state-v1.db ".recover" | sqlite3 plugins/cpa-super-billing-state-v1.db.recovered
    ```
 
-4. After starting, open the **CC split** page and use **Rebuild from history** to restore `cc_segments` and the other data derived from request history.
+4. After starting, open the **Subscription split** page and use **Rebuild from history** to restore `cc_segments` and the other data derived from request history.
 
 ## Access
 
 Administrators can open the plugin from the management panel or visit it directly:
 
 ```text
-http(s)://<CLIProxyAPI address>/v0/resource/plugins/cpa-cc-billing/ui
+http(s)://<CLIProxyAPI address>/v0/resource/plugins/cpa-super-billing/ui
 ```
 
 API key holders can use their own key to view their subscription and usage:
 
 ```text
-http(s)://<CLIProxyAPI address>/v0/resource/plugins/cpa-cc-billing/ui#account
+http(s)://<CLIProxyAPI address>/v0/resource/plugins/cpa-super-billing/ui#account
 ```
 
 The **Page display** card on the Settings page is stored in the database and starts from its defaults after an upgrade:
@@ -355,12 +390,12 @@ On CLIProxyAPI 8.0.37 or later, the model list an API key receives contains only
 | --- | --- | --- | --- |
 | Concurrency limit reached | `429` | `rate_limit_error` | `rate_limit_exceeded` |
 | Subscription quota exhausted | `429` | `rate_limit_error` | `rate_limit_exceeded` |
-| Remainder key refused by a CC weekly or 5-hour reservation, or its own weekly cap | `429` | `rate_limit_error` | `rate_limit_exceeded` |
+| Remainder key refused by a split weekly or 5-hour reservation, or its own weekly cap | `429` | `rate_limit_error` | `rate_limit_exceeded` |
 | Model access denied | `403` | `permission_error` | `insufficient_quota` |
 | The credentials the routing rules allow do not serve the model, or none is available | `503` | `server_error` | `internal_server_error` |
 | The selected credential violates the routing rules | `503` | `server_error` | `routing_credential_mismatch` |
 | The selected credential's routing permissions cannot be verified | `503` | `server_error` | `routing_credential_unverified` |
-| Model has no price and `allow_unpriced_models` is disabled | `503` | `cpa_cc_billing_error` | `model_price_error` |
+| Model has no price and `allow_unpriced_models` is disabled | `503` | `cpa_super_billing_error` | `model_price_error` |
 
 ## Acknowledgments
 

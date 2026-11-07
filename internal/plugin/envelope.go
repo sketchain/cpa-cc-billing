@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 func OKEnvelope(v any) ([]byte, error) {

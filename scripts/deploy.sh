@@ -12,7 +12,7 @@ chmod 600 .env
 : "${CPA_BASE_URL:?Set CPA_BASE_URL in .env}"
 : "${CPA_MANAGEMENT_PASSWORD:?Set CPA_MANAGEMENT_PASSWORD in .env}"
 
-id=cpa-cc-billing
+id=cpa-super-billing
 service=cli-proxy-api
 version=$(sed -n 's/^[[:space:]]*Version[[:space:]]*= "\(.*\)"/\1/p' internal/plugin/types.go)
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Cannot determine the plugin version.' >&2; exit 1; }

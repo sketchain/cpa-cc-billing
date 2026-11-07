@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 // One auth file serves codex models; one config key, which host.auth.list

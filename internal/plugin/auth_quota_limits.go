@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/billing"
+	"cpa-super-billing/internal/messages"
 )
 
 // quotaMeter selects a credential's requests for a quota window.

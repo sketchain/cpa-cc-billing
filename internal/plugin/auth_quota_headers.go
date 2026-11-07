@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 var codexQuotaGroup = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,120}$`)
@@ -57,6 +57,7 @@ func quotaHeaderReport(provider string, input http.Header, at time.Time) *billin
 		// weekly windows.
 		if active := headers.Get("X-Codex-Active-Limit"); active == "" || quotaLimitAlias(active) == "premium" {
 			appendCodexWindows(&report, headers, "X-Codex-", codexMainLimit, at)
+			report.LimitReached = strings.EqualFold(headers.Get("X-Codex-Limit-Reached"), "true") && len(report.Windows) > 0
 		}
 		for _, group := range groups {
 			prefix := "X-Codex-" + group + "-"

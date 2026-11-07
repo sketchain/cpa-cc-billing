@@ -1,6 +1,6 @@
-const PLUGIN_BASE = "/v0/management/plugins/cpa-cc-billing";
-const ACCOUNT_BASE = "/v0/resource/plugins/cpa-cc-billing";
-const PRODUCT_NAME = "CPA CC Billing";
+const PLUGIN_BASE = "/v0/management/plugins/cpa-super-billing";
+const ACCOUNT_BASE = "/v0/resource/plugins/cpa-super-billing";
+const PRODUCT_NAME = "CPA Super Billing";
 const DISPLAY_SEPARATOR = "\u2009·\u2009";
 const DISPLAY_SLASH = "\u2009/\u2009";
 const $ = (id) => document.getElementById(id);
@@ -8,20 +8,26 @@ const { message: m, setText, setAttribute: setTextAttribute, UIError } = window.
 const locale = () => window.billingI18n.locale();
 window.billingI18n.initialize();
 
-const CREDENTIAL_DB = "cpa-cc-billing-credentials";
+const CREDENTIAL_DB = "cpa-super-billing-credentials";
 const CREDENTIAL_STORE = "vault";
 const CREDENTIAL_KEY = "wrapping-key";
-const SESSION_CREDENTIAL_PREFIX = "cpa-cc-billing.session.v1.";
-const VIEW_PREFERENCE_PREFIX = "cpa-cc-billing.view.v1.";
+const LEGACY_CREDENTIAL_DB = "cpa-cc-billing-credentials";
+const CREDENTIAL_MIGRATION_MARKER = "cpa-super-billing.credentials-migrated.v1";
+const SESSION_CREDENTIAL_PREFIX = "cpa-super-billing.session.v1.";
+const VIEW_PREFERENCE_PREFIX = "cpa-super-billing.view.v1.";
 
 const embedded = window.parent !== window;
 document.body.classList.toggle("embedded", embedded);
-const ADMIN_TAB_IDS = ["keys", "analysis", "request-events", "errors", "auth-files", "ai-providers", "cc", "settings"];
+const ADMIN_TAB_IDS = ["keys", "analysis", "request-events", "errors", "auth-files", "ai-providers", "split", "settings"];
 const ACCOUNT_TAB_IDS = ["subscription", "analysis", "request-events", "errors", "auth-files", "ai-providers"];
-const PAGE_ROUTE_KEY = "cpa-cc-billing.route.v1." + (embedded ? "embedded" : "standalone");
+const PAGE_ROUTE_KEY = "cpa-super-billing.route.v1." + (embedded ? "embedded" : "standalone");
+
+// The subscription split was the "cc" tab.
+const LEGACY_ADMIN_TABS = { cc: "split" };
 
 function parsePageRoute(value) {
-  const [role, tab] = value.split("/");
+  const [role, stored] = value.split("/");
+  const tab = LEGACY_ADMIN_TABS[stored] || stored;
   if (role === "account") return { role, tab: ACCOUNT_TAB_IDS.includes(tab) ? tab : "subscription" };
   if (role === "admin") return { role, tab: ADMIN_TAB_IDS.includes(tab) ? tab : "keys" };
   return null;
@@ -71,7 +77,59 @@ const authQuotaGeneration = { admin: 0, account: 0 };
 const credentialScope = { admin: "", account: "" };
 let accountTab = initialRoute.role === "account" ? initialRoute.tab : "subscription";
 
-function openCredentialDB() {
+// Requests on an IndexedDB database resolve through one promise.
+function idbRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+// Copies the saved credentials of the plugin's former name (cpa-cc-billing)
+// into this page's database once, before anything reads it. The old database
+// is left as it is; opening it never creates it.
+async function migrateLegacyCredentials() {
+  try { if (!window.indexedDB || localStorage.getItem(CREDENTIAL_MIGRATION_MARKER)) return; } catch (_) { return; }
+  let legacy = null;
+  let current = null;
+  try {
+    legacy = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(LEGACY_CREDENTIAL_DB);
+      // A database that did not exist is being created: abort to leave none behind.
+      request.onupgradeneeded = (event) => { if (event.oldVersion === 0) request.transaction.abort(); };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => (request.error?.name === "AbortError" ? resolve(null) : reject(request.error));
+    });
+    const entries = [];
+    if (legacy?.objectStoreNames.contains(CREDENTIAL_STORE)) {
+      const store = legacy.transaction(CREDENTIAL_STORE, "readonly").objectStore(CREDENTIAL_STORE);
+      const [keys, values] = await Promise.all([idbRequest(store.getAllKeys()), idbRequest(store.getAll())]);
+      keys.forEach((key, index) => entries.push([key, values[index]]));
+    }
+    if (entries.length) {
+      const request = indexedDB.open(CREDENTIAL_DB, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore(CREDENTIAL_STORE);
+      current = await idbRequest(request);
+      await new Promise((resolve, reject) => {
+        const transaction = current.transaction(CREDENTIAL_STORE, "readwrite");
+        const store = transaction.objectStore(CREDENTIAL_STORE);
+        // A database already in use keeps what it has.
+        store.count().onsuccess = (event) => { if (event.target.result === 0) for (const [key, value] of entries) store.put(value, key); };
+        transaction.oncomplete = resolve;
+        transaction.onerror = transaction.onabort = () => reject(transaction.error);
+      });
+    }
+    try { localStorage.setItem(CREDENTIAL_MIGRATION_MARKER, "1"); } catch (_) {}
+  } catch (_) { } finally {
+    legacy?.close();
+    current?.close();
+  }
+}
+
+const credentialMigration = migrateLegacyCredentials();
+
+async function openCredentialDB() {
+  await credentialMigration;
   return new Promise((resolve, reject) => {
     if (!window.indexedDB || !window.crypto?.subtle) {
       reject(new UIError(m("ui.secure_key_storage_is_not_supported_in_this_environment")));

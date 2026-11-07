@@ -137,6 +137,7 @@ type SimKey struct {
 // SimResult is a simulation's outcome.
 type SimResult struct {
 	PoolID         string          `json:"pool_id"`
+	Provider       string          `json:"provider"`
 	From           time.Time       `json:"from"`
 	To             time.Time       `json:"to"`
 	Conversion     BasisConversion `json:"conversion"`
@@ -504,13 +505,14 @@ func (m *Manager) Simulate(request SimRequest, options SimOptions) (SimResult, e
 	if options.RetainedFrom.After(from) {
 		from = options.RetainedFrom
 	}
-	conversion := NewBasisConversion(estimates, options.Prices)
+	conversion := NewBasisConversion(estimates.For(pool.Provider), options.Prices)
+	safety := settings.ParamsFor(pool.Provider).SafetyFactor
 	latest, deltas := m.live(snap)
 	status := poolStatus(snap, latest, deltas, pool, now)
-	result := SimResult{PoolID: pool.ID, From: from, To: now, Conversion: conversion, SafetyFactor: settings.Params.SafetyFactor,
+	result := SimResult{PoolID: pool.ID, Provider: pool.Provider, From: from, To: now, Conversion: conversion, SafetyFactor: safety,
 		K: status.K, FiveHour: status.FiveHourEnabled, Accounts: []SimAccount{}, Keys: []SimKey{}, Weeks: []SimWeek{}, Spans: []SimSpan{},
 		Approximations: []string{ApproxCurrentEstimates, ApproxReadings, ApproxHourly, ApproxRemainderDemand, ApproxCurrentQuota}}
-	input := ReplayInput{From: from, Now: now, Safety: settings.Params.SafetyFactor, FiveHour: status.FiveHourEnabled, Conversion: conversion}
+	input := ReplayInput{From: from, Now: now, Safety: safety, FiveHour: status.FiveHourEnabled, Conversion: conversion}
 	var scopes []string
 	var baseline, scenario []ReplayFixed
 	for _, fixed := range status.Fixed {
@@ -578,11 +580,12 @@ func (m *Manager) Simulate(request SimRequest, options SimOptions) (SimResult, e
 				if db == nil {
 					return fmt.Errorf("The billing database is not open")
 				}
-				week, err := readHourlyPoints(db, account.AuthIndex, Week, start, end)
+				source := settings.accountSource(account.AuthIndex)
+				week, err := readHourlyPoints(db, source, account.AuthIndex, Week, start, end)
 				if err != nil {
 					return err
 				}
-				five, err := readHourlyPoints(db, account.AuthIndex, FiveHours, start, end)
+				five, err := readHourlyPoints(db, source, account.AuthIndex, FiveHours, start, end)
 				account.Week, account.FiveHourTrack = append(account.Week, week...), append(account.FiveHourTrack, five...)
 				return err
 			})
@@ -596,7 +599,7 @@ func (m *Manager) Simulate(request SimRequest, options SimOptions) (SimResult, e
 			return fmt.Errorf("The billing database is not open")
 		}
 		var err error
-		resets, err = readWeeklyResets(db, pool.AuthIndexes[0], from.Add(-Week))
+		resets, err = readWeeklyResets(db, settings.accountSource(pool.AuthIndexes[0]), pool.AuthIndexes[0], from.Add(-Week))
 		return err
 	})
 	if err != nil {

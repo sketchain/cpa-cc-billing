@@ -1,5 +1,5 @@
 {
-  "name": "cpa-cc-billing-dev-scripts",
+  "name": "cpa-super-billing-dev-scripts",
   "private": true,
   "type": "module",
   "engines": { "node": ">=20" },

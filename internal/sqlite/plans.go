@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"slices"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func replacePlans(tx *sql.Tx, state *billing.State) error {

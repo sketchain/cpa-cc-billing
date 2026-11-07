@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func (a *App) createPlan(req ManagementRequest) ManagementResponse {

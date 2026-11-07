@@ -15,7 +15,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 const schemaVersion = 25

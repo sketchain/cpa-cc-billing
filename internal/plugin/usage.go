@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 type tokenSemantics uint8

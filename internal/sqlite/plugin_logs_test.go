@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func mustAppendPluginLog(t *testing.T, database *DB, at time.Time, level billing.PluginLogLevel, message string, cutoff time.Time) {

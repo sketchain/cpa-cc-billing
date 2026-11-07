@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func registerState(t *testing.T, app *App, path string) error {
@@ -47,7 +47,7 @@ func pluginLogMessages(t *testing.T, app *App) []string {
 // records where in the plugin log before the migration runs.
 func TestRegisterBacksUpTheDatabaseBeforeMigrating(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "cpa-cc-billing-state-v1.db")
+	path := filepath.Join(dir, "cpa-super-billing-state-v1.db")
 	first := newTestApp(t)
 	if err := registerState(t, first, path); err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestRegisterBacksUpTheDatabaseBeforeMigrating(t *testing.T) {
 	if err := registerState(t, app, path); err != nil {
 		t.Fatal(err)
 	}
-	matches, err := filepath.Glob(filepath.Join(dir, "cpa-cc-billing-state-v1.db.bak-u24-to-u25-cc4-*"))
+	matches, err := filepath.Glob(filepath.Join(dir, "cpa-super-billing-state-v1.db.bak-u24-to-u25-cc4-*"))
 	if err != nil || len(matches) != 1 {
 		t.Fatalf("backups = %v (%v)", matches, err)
 	}

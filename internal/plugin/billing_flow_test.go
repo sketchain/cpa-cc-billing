@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
-	"cpa-cc-billing/internal/sqlite"
+	"cpa-super-billing/internal/billing"
+	"cpa-super-billing/internal/sqlite"
 )
 
 const flowModel = "gpt-5.5"

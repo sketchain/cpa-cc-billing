@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -52,7 +52,9 @@ func newFakeHost(t *testing.T) *fakeHost {
 	t.Cleanup(func() { db.Close() })
 	if _, err := db.Exec(`
 		CREATE TABLE request_events (id INTEGER PRIMARY KEY, at INTEGER, scope TEXT NOT NULL DEFAULT '', auth_index TEXT, latency_ms INTEGER, total_cost REAL, currency TEXT,
-			billing_model TEXT NOT NULL DEFAULT '', upstream_model TEXT NOT NULL DEFAULT '');
+			billing_model TEXT NOT NULL DEFAULT '', upstream_model TEXT NOT NULL DEFAULT '', price_source TEXT NOT NULL DEFAULT '');
+		CREATE TABLE quota_reports (request_event_id INTEGER PRIMARY KEY, auth_index TEXT, provider TEXT, at INTEGER,
+			plan TEXT NOT NULL DEFAULT '', credit_balance TEXT NOT NULL DEFAULT '', credits_unlimited INTEGER);
 		CREATE TABLE quota_report_windows (request_event_id INTEGER, limit_key TEXT, seconds INTEGER, auth_index TEXT, provider TEXT,
 			at INTEGER, used_percent REAL, reset_at INTEGER);`); err != nil {
 		t.Fatal(err)
@@ -74,11 +76,11 @@ func (h *fakeHost) WithDB(fn func(*sql.DB) error) error {
 }
 func (h *fakeHost) Now() time.Time                         { h.calls.Add(1); return h.now }
 func (h *fakeHost) ToUSD(amount float64, _ string) float64 { return amount }
-func (h *fakeHost) LatestObservations([]string, time.Time) (map[string]Observation, error) {
+func (h *fakeHost) LatestObservations(map[string]QuotaSource, time.Time) (map[string]Observation, error) {
 	h.calls.Add(1)
 	return map[string]Observation{}, nil
 }
-func (h *fakeHost) WeeklyPeriod(string, time.Time) (WeeklyPeriod, bool, error) {
+func (h *fakeHost) WeeklyPeriod(string, QuotaSource, time.Time) (WeeklyPeriod, bool, error) {
 	h.calls.Add(1)
 	if h.weeklyErr != nil {
 		return WeeklyPeriod{}, false, h.weeklyErr

@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 UI_DIR = ROOT / "internal" / "plugin" / "web"
 # Matches the placeholders internal/plugin/ui.go replaces with sibling files.
 UI_INCLUDE = re.compile(r"/\*([a-z0-9-]+\.(?:css|js))\*/")
-API_BASE = "/v0/management/plugins/cpa-cc-billing"
-RESOURCE_BASE = "/v0/resource/plugins/cpa-cc-billing"
+API_BASE = "/v0/management/plugins/cpa-super-billing"
+RESOURCE_BASE = "/v0/resource/plugins/cpa-super-billing"
 NOW = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 CALLER_SCOPE_SALT = b"cli-proxy-api:caller-scope:v1\0"
 
@@ -30,7 +30,7 @@ HOST_SHELL = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__HOST_LABEL__ · CPA CC Billing 样式预览</title>
+<title>__HOST_LABEL__ · CPA Super Billing 样式预览</title>
 <script>
 {
   const scope="__HOST_MODE__"==="cpamp"?"v2|"+location.host:location.host;
@@ -163,10 +163,10 @@ html[data-host=cpamp] #plugin-frame{background:var(--bg-primary)}
 <body>
 <aside class="sidebar">
   <div class="brand"><span class="brand-mark">◈</span><span>__HOST_LABEL__</span></div>
-  <div class="nav-placeholder"><span>仪表盘</span><span>AI 提供商</span><span>插件管理</span><span class="active">CPA CC Billing</span></div>
+  <div class="nav-placeholder"><span>仪表盘</span><span>AI 提供商</span><span>插件管理</span><span class="active">CPA Super Billing</span></div>
 </aside>
 <header class="navbar">
-  <div class="navbar-left"><button class="mobile-menu" title="菜单">☰</button><span>CPA CC Billing</span></div>
+  <div class="navbar-left"><button class="mobile-menu" title="菜单">☰</button><span>CPA Super Billing</span></div>
   <div class="theme-controls" aria-label="预览主题">
     <select id="host-language" aria-label="Language"><option value="en">English</option><option value="zh-CN">简体中文</option><option value="zh-TW">繁體中文</option><option value="ru">Русский</option></select>
     <button type="button" data-action="refresh" title="刷新">↻</button>
@@ -175,7 +175,7 @@ html[data-host=cpamp] #plugin-frame{background:var(--bg-primary)}
     <button type="button" data-theme-choice="dark" title="深色主题">●</button>
   </div>
 </header>
-<main class="content"><iframe id="plugin-frame" src="/ui" title="CPA CC Billing 插件"></iframe></main>
+<main class="content"><iframe id="plugin-frame" src="/ui" title="CPA Super Billing 插件"></iframe></main>
 <script>
 "use strict";
 const HOST_MODE="__HOST_MODE__";
@@ -1462,7 +1462,7 @@ PLUGIN_LOGS = [
         "at": iso(NOW - timedelta(minutes=11)),
         "level": "info",
         "message": (
-            "已加载计费数据库 /srv/cli-proxy-api/plugins/cpa-cc-billing-state-v1.db："
+            "已加载计费数据库 /srv/cli-proxy-api/plugins/cpa-super-billing-state-v1.db："
             "8 个 API Key、3 个订阅计划、29 条请求事件。已启用。"
         ),
     },
@@ -1820,27 +1820,51 @@ def key_rows():
                  cc_kind=CC_SETTINGS["keys"].get(key["scope"], {}).get("kind", "")) for key in KEYS]
 
 
-# CC split preview: one Claude account, one pool, one fixed and one remainder key.
+# Subscription split preview: a Claude pool with a fixed and a remainder key,
+# and a ChatGPT (Codex) pool with a Team account without k and another whose
+# reports have only the 7-day window.
 CC_DEFAULT_PARAMS = {
     "segment_retention_days": 365, "block_gap_minutes": 5, "window_percent": 8, "reference_mode": "global",
     "suspicious_threshold": 0.2, "exclude_vote_share": 0.5, "weight_power": 2, "recent_days": 14, "recent_share": 0.9,
-    "k_min_weekly_points": 10, "cold_start_blocks": 20, "tier_weekly_usd": {"pro": 250, "max5x": 1250, "max20x": 2500},
-    "tier_k": {"pro": 8, "max5x": 8, "max20x": 8}, "refuse_remainder_when_unloaded": True,
+    "k_min_weekly_points": 10, "cold_start_blocks": 20, "refuse_remainder_when_unloaded": True,
     "safety_factor": 0.9,
+}
+CC_DEFAULT_WEIGHTS = {"enabled": False, "items": [], "min_segments": 30, "min_cost_usd": 20, "min_share_spread": 0.05}
+CC_DEFAULT_PROVIDERS = {
+    "claude": {"limit_key": "unified", "tiers": [{"id": "pro", "name": "Pro", "weekly_usd": 250, "k": 8},
+                                                 {"id": "max5x", "name": "Max 5x", "weekly_usd": 1250, "k": 8},
+                                                 {"id": "max20x", "name": "Max 20x", "weekly_usd": 2500, "k": 8}],
+               "params": {}, "segment_rules": {"main_window_only": False, "exclude_unpriced": False, "pause_when_exhausted": False},
+               "weights": CC_DEFAULT_WEIGHTS},
+    "codex": {"limit_key": "codex", "tiers": [{"id": "team", "name": "Team", "weekly_usd": 60, "k": None}], "params": {},
+              "segment_rules": {"main_window_only": True, "exclude_unpriced": True, "pause_when_exhausted": True}, "weights": CC_DEFAULT_WEIGHTS},
 }
 CC_SETTINGS = {
     "params": json.loads(json.dumps(CC_DEFAULT_PARAMS)),
-    "pools": [{"id": "pool-1", "name": "Claude 主账号", "auth_indexes": ["auth-demo-claude", "auth-removed-claude"], "anchor_auth_index": "auth-demo-claude"},
-              {"id": "pool-2", "name": "备用池", "auth_indexes": [], "anchor_auth_index": ""}],
-    "accounts": {"auth-demo-claude": {"tier": "max5x"}},
+    "providers": json.loads(json.dumps(CC_DEFAULT_PROVIDERS)),
+    "pools": [{"id": "pool-1", "name": "Claude 主账号", "provider": "claude", "auth_indexes": ["auth-demo-claude", "auth-removed-claude"],
+               "anchor_auth_index": "auth-demo-claude"},
+              {"id": "pool-2", "name": "备用池", "provider": "claude", "auth_indexes": [], "anchor_auth_index": ""},
+              {"id": "pool-3", "name": "GPT Team", "provider": "codex", "auth_indexes": ["auth-demo-codex-plus", "auth-demo-codex-pro"],
+               "anchor_auth_index": "auth-demo-codex-plus"}],
+    "accounts": {"auth-demo-claude": {"tier": "max5x"}, "auth-demo-codex-plus": {"provider": "codex", "tier": "team"}},
     "keys": {LIVE_KEYS[0]["scope"]: {"kind": "fixed", "pool_id": "pool-1"},
              LIVE_KEYS[1]["scope"]: {"kind": "remainder", "pool_id": "pool-1", "weekly_cap_usd": 300},
+             LIVE_KEYS[2]["scope"]: {"kind": "remainder", "pool_id": "pool-3"},
              # A key deleted from CLIProxyAPI that the settings still list.
              "f" * 64: {"kind": "remainder", "pool_id": "pool-2"}},
-    "weights": {"enabled": False, "min_segments": 30, "min_cost_usd": 20, "min_share_spread": 0.05,
-                "items": [{"id": "item-1", "name": "Fable", "models": ["claude-fable-20260801", "claude-fable-20261001"]},
-                          {"id": "item-2", "name": "Haiku", "models": ["claude-haiku-4-5"], "manual_multiplier": 0.6}]},
 }
+CC_SETTINGS["providers"]["claude"]["weights"] = {
+    "enabled": False, "min_segments": 30, "min_cost_usd": 20, "min_share_spread": 0.05,
+    "items": [{"id": "item-1", "name": "Fable", "models": ["claude-fable-20260801", "claude-fable-20261001"]},
+              {"id": "item-2", "name": "Haiku", "models": ["claude-haiku-4-5"], "manual_multiplier": 0.6}]}
+
+
+def cc_provider(index):
+    for pool in CC_SETTINGS["pools"]:
+        if index in pool["auth_indexes"]:
+            return pool.get("provider", "claude")
+    return CC_SETTINGS["accounts"].get(index, {}).get("provider", "claude")
 CC_CALIBRATIONS = [
     {"id": 2, "item": {"id": "item-1", "name": "Fable", "models": ["claude-fable-20260801", "claude-fable-20261001"]},
      "auth_index": "auth-demo-claude", "started_at": iso(NOW - timedelta(hours=3)), "final": False,
@@ -1854,8 +1878,20 @@ CC_CALIBRATIONS = [
 ]
 
 
-def cc_weights_view(accounts):
-    weights = CC_SETTINGS.get("weights") or {"items": []}
+def cc_weights_views(accounts):
+    views = {}
+    for provider in ("claude", "codex"):
+        own = [account for account in accounts if account["provider"] == provider]
+        views[provider] = cc_weights_view(own, provider)
+    return views
+
+
+def cc_weights_view(accounts, provider="claude"):
+    weights = CC_SETTINGS["providers"][provider].get("weights") or {"items": []}
+    if provider != "claude":
+        return {"basis": "weighted" if weights.get("enabled") else "raw", "estimate": {"items": []}, "effective": [], "calibrations": [],
+                "models": [{"model": "gpt-5.3-codex", "cost_usd": 41.2, "share": 1, "segments": 96}], "comparison": [],
+                "unsplit_segments": 0, "segments": 96}
     usage = [("claude-sonnet-4-5", 812.4, 2310), ("claude-opus-4-5", 402.1, 1104), ("claude-fable-20261001", 188.6, 640),
              ("claude-fable-20260801", 21.3, 77), ("claude-haiku-4-5", 9.8, 41), ("", 66.0, 180)]
     total = sum(cost for _, cost, _ in usage)
@@ -1900,7 +1936,7 @@ CC_PRICE_MULTIPLIERS = {
 }
 
 
-PANEL_TABS = ["keys", "analysis", "request-events", "errors", "auth-files", "ai-providers", "cc"]
+PANEL_TABS = ["keys", "analysis", "request-events", "errors", "auth-files", "ai-providers", "split"]
 PANEL_SETTINGS = {"hidden_tabs": ["ai-providers"], "account_self_service": True}
 
 
@@ -1917,7 +1953,9 @@ def cc_auth_summaries():
                 "weekly_total_usd": account["weekly_total_usd"], "totals_from": account["totals_from"], "k": account["k"],
                 "k_source": account["k_source"], "remaining_week_usd": account["remaining_week_usd"],
                 "remaining_five_hour_usd": account["remaining_five_hour_usd"], "cold_start": account["cold_start"],
-                "clean_blocks": account["clean_blocks"], "cold_start_blocks": CC_SETTINGS["params"]["cold_start_blocks"]})
+                "clean_blocks": account["clean_blocks"], "cold_start_blocks": CC_SETTINGS["params"]["cold_start_blocks"],
+                "provider": account["provider"], "segment_window": account.get("segment_window") or "5h",
+                "needs_k": account["needs_k"], "paused": account["paused"]})
             summary["pools"].append(pool["name"] or pool["id"])
     return summaries
 
@@ -1966,8 +2004,13 @@ def cc_payload():
     accounts = []
     for index in dict.fromkeys([i for pool in CC_SETTINGS["pools"] for i in pool["auth_indexes"]] + list(CC_SETTINGS["accounts"])):
         settings = CC_SETTINGS["accounts"].get(index, {})
+        provider = cc_provider(index)
+        if provider == "codex":
+            accounts.append(cc_codex_account(index, settings, blocks))
+            continue
         k = settings.get("manual_k") or 6.02
         accounts.append({
+            "provider": provider, "needs_k": False, "paused": False, "excluded": {},
             "auth_index": index, "tier": settings.get("tier") or "pro", "total_blocks": 34, "clean_blocks": 31, "segments": 1180,
             "excluded_segments": 74, "ratio": 2.21, "five_hour_usd": 45.2, "k_auto": 6.02, "k_manual": settings.get("manual_k"),
             "k": k, "k_source": "manual" if settings.get("manual_k") else "auto",
@@ -1995,25 +2038,52 @@ def cc_payload():
                                         "message_params": {"v0": '"' + "Claude 主账号" + '"', "v1": "12.40", "v2": "13.50"}},
                        retry_at=iso(NOW + timedelta(hours=2, minutes=14)))
         keys.append(row)
-    pools = [{"id": pool["id"], "name": pool["name"], "auth_indexes": pool["auth_indexes"], "remaining_week_usd": 135.8,
-              "remaining_five_hour_usd": 25.6, "reserved_week_usd": 57.5, "reserved_five_hour_usd": 13.5, "k": 6.02,
-              "five_hour_enabled": True, "fixed": [], "remainder_balance_usd": 78.3} for pool in CC_SETTINGS["pools"]]
-    credentials = [{"auth_index": item["auth_index"], "name": item.get("email") or item["name"], "disabled": item.get("disabled", False)}
-                   for item in AUTH_FILES if item["category"] == "claude"]
+    pools = [{"id": pool["id"], "name": pool["name"], "provider": pool.get("provider", "claude"), "auth_indexes": pool["auth_indexes"],
+              "remaining_week_usd": 135.8, "remaining_five_hour_usd": 25.6, "reserved_week_usd": 57.5, "reserved_five_hour_usd": 13.5,
+              "k": 6.02, "five_hour_enabled": pool.get("provider", "claude") == "claude", "fixed": [], "remainder_balance_usd": 78.3}
+             for pool in CC_SETTINGS["pools"]]
+    credentials = [{"auth_index": item["auth_index"], "name": item.get("email") or item["name"], "disabled": item.get("disabled", False),
+                    "provider": item["category"], **({"plan": "team", "suggested_tier": "team"} if item["category"] == "codex" else {})}
+                   for item in AUTH_FILES if item["category"] in ("claude", "codex")]
     options = [{"scope": key["scope"], "preview": key["preview"], "label": key["label"], "plan_name": key.get("plan_name", ""),
                 "has_weekly_window": True} for key in LIVE_KEYS]
     if not CC_LOADED[0]:
         empty = {"basis": "raw", "estimate": {"items": []}, "effective": [], "calibrations": [], "models": [], "comparison": [],
                  "unsplit_segments": 0, "segments": 0}
-        return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "accounts": [], "pools": [], "keys": [],
-                       "stored_segments": 0, "weights": empty, "at": iso(NOW), "loaded": False, "error": "database is locked",
-                       "warnings": cc_shared_plan_warnings()},
+        return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "default_providers": CC_DEFAULT_PROVIDERS, "accounts": [],
+                       "pools": [], "keys": [], "stored_segments": 0, "weights": {"claude": empty, "codex": empty}, "at": iso(NOW),
+                       "loaded": False, "error": "database is locked", "warnings": cc_shared_plan_warnings()},
                 "credentials": credentials, "key_options": options, "credential_warning": "", "price_multipliers": {}, "price_warning": ""}
-    return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "accounts": accounts, "pools": pools, "keys": keys,
-                   "stored_segments": 1180, "weights": cc_weights_view(accounts), "at": iso(NOW), "loaded": True,
+    return {"cc": {"settings": CC_SETTINGS, "defaults": CC_DEFAULT_PARAMS, "default_providers": CC_DEFAULT_PROVIDERS, "accounts": accounts,
+                   "pools": pools, "keys": keys, "stored_segments": 1180, "weights": cc_weights_views(accounts), "at": iso(NOW), "loaded": True,
                    "warnings": cc_shared_plan_warnings()},
             "credentials": credentials, "key_options": options, "credential_warning": "", "price_multipliers": CC_PRICE_MULTIPLIERS,
-            "price_warning": ""}
+            "price_warning": "", "key_routing": [{"scope": LIVE_KEYS[2]["scope"], "provider": "codex", "unrestricted": True}],
+            "legacy_database": {"path": "/srv/cli-proxy-api/plugins/cpa-cc-billing-state-v1.db",
+                                "active": "/srv/cli-proxy-api/plugins/cpa-super-billing-state-v1.db", "copied_at": iso(NOW - timedelta(minutes=20))}}
+
+
+def cc_codex_account(index, settings, blocks):
+    """A Team account without k, and one whose reports have only the 7-day window."""
+    weekly_only = index == "auth-demo-codex-pro"
+    account = {
+        "auth_index": index, "provider": "codex", "tier": settings.get("tier") or "team", "total_blocks": 18, "clean_blocks": 16,
+        "segments": 240, "excluded_segments": 12, "ratio": 10.4, "five_hour_usd": 9.6, "k_manual": settings.get("manual_k"),
+        "k": settings.get("manual_k"), "k_source": "manual" if settings.get("manual_k") else "none",
+        "k_estimate": {"recent": {"gain_5h": 40, "gain_7d": 6, "k": 0, "valid": False}, "old": {"gain_5h": 0, "gain_7d": 0, "k": 0, "valid": False},
+                       "total": {"gain_5h": 40, "gain_7d": 6, "k": 0, "valid": False}, "basis": "none"},
+        "cold_start": False, "totals_from": "tier", "needs_k": not settings.get("manual_k"), "five_hour_total_usd": 9.6, "weekly_total_usd": 60,
+        "used_5h": 44.5, "used_7d": 31.2, "reset_5h": iso(NOW + timedelta(hours=3, minutes=5)), "reset_7d": iso(NOW + timedelta(days=4, hours=2)),
+        "observed_at": iso(NOW - timedelta(minutes=2)), "remaining_week_usd": 0.9 * 60 * 0.688, "remaining_five_hour_usd": 0.9 * 9.6 * 0.555,
+        "cursor": iso(NOW - timedelta(minutes=10)), "recent_blocks": blocks[:4], "paused": False,
+        "excluded": {"usd": {"other_limit": 7.42}, "requests": {"other_limit": 31, "unpriced": 4}, "unpriced_models": {"gpt-5.3-codex-mini": 4}},
+    }
+    if weekly_only:
+        account.update(segment_window="7d", needs_k=False, five_hour_total_usd=0, weekly_total_usd=58.4, totals_from="estimated", ratio=1.71,
+                       five_hour_usd=58.4, used_5h=0, reset_5h="0001-01-01T00:00:00Z", paused=True, pause_reason="limit_reached",
+                       paused_since=iso(NOW - timedelta(minutes=40)), used_7d=100, remaining_week_usd=0, remaining_five_hour_usd=0,
+                       k=None, k_source="none")
+    return account
 
 
 def cc_trend_payload(auth_index):
@@ -2026,7 +2096,7 @@ def cc_trend_payload(auth_index):
     settings = CC_SETTINGS["accounts"].get(auth_index, {})
     k = settings.get("manual_k") or 6.02
     rng = random.Random(auth_index)
-    days = 40 if auth_index == "auth-demo-claude" else 1
+    days = 40 if auth_index in ("auth-demo-claude", "auth-demo-codex-plus", "auth-demo-codex-pro") else 1
     empty_days = {5, 6, 17, 30}
     low_days = {3, 12, 25, 38}
     buckets, segments = [], []
@@ -2044,7 +2114,14 @@ def cc_trend_payload(auth_index):
             kept = 2 - excluded if CC_LOADED[0] else 2
             segments.append({"at": iso(at), "segments": kept, "excluded": 2 - kept, "gain": kept,
                              "cost_usd": round(sum(rng.uniform(0.38, 0.52) for _ in range(kept)), 4)})
+    provider = cc_provider(auth_index)
+    window = "7d" if auth_index == "auth-demo-codex-pro" else "5h"
+    if provider == "codex":
+        k = settings.get("manual_k")
+        if window == "7d":
+            buckets = []
     return {"trend": {"auth_index": auth_index, "loaded": CC_LOADED[0], "from": iso(NOW - timedelta(days=365)), "at": iso(NOW),
+                      "provider": provider, "segment_window": window, "needs_k": provider == "codex" and window == "5h" and not k,
                       "retention_days": 365, "k_min_weekly_points": CC_SETTINGS["params"]["k_min_weekly_points"], "k": k,
                       "k_source": "manual" if settings.get("manual_k") else "auto" if CC_LOADED[0] else "tier",
                       "exclusion": "estimate" if CC_LOADED[0] else "raw", "buckets": buckets, "segment_hours": segments}}
@@ -2069,11 +2146,11 @@ def cc_forecast_payload(query):
     reset_5h, reset_7d = NOW + timedelta(hours=2, minutes=14), NOW + timedelta(days=3, hours=4)
     eta = lambda hours: {"status": "eta", "at": iso(NOW + timedelta(hours=hours))}
     later = lambda hours: {"status": "after_reset", "at": iso(NOW + timedelta(hours=hours))}
-    weighted = CC_SETTINGS.get("weights", {}).get("enabled")
-    conversion = {"basis": "weighted" if weighted else "raw", "factors": {"claude-fable-20261001": 3.92, "claude-fable-20260801": 3.92} if weighted else {},
-                  "priced_models": ["claude-haiku-4-5"] if weighted else []}
     pools = []
     for pool in CC_SETTINGS["pools"]:
+        weighted = CC_SETTINGS["providers"][pool.get("provider", "claude")]["weights"].get("enabled")
+        conversion = {"basis": "weighted" if weighted else "raw", "factors": {"claude-fable-20261001": 3.92, "claude-fable-20260801": 3.92} if weighted else {},
+                      "priced_models": ["claude-haiku-4-5"] if weighted else []}
         accounts = []
         for index, auth_index in enumerate(pool["auth_indexes"]):
             if index == 0:
@@ -2102,9 +2179,9 @@ def cc_forecast_payload(query):
         if not accounts:
             five_pool.update(reading=cc_velocity(None), spend=cc_velocity(None), source="none", exhaust={"status": "unknown"}, block={"status": "unknown"})
             week_pool.update(reading=cc_velocity(None), spend=cc_velocity(None), source="none", exhaust={"status": "unknown"}, block={"status": "unknown"})
-        pools.append({"id": pool["id"], "name": pool["name"], "accounts": accounts, "five_hour": five_pool, "week": week_pool})
-    return {"forecast": {"at": iso(NOW), "window_5h_seconds": window_5h * 60, "window_7d_seconds": window_7d * 3600, "safety_factor": 0.9,
-                         "conversion": conversion, "pools": pools}}
+        pools.append({"id": pool["id"], "name": pool["name"], "provider": pool.get("provider", "claude"), "safety_factor": 0.9,
+                      "conversion": conversion, "accounts": accounts, "five_hour": five_pool, "week": week_pool})
+    return {"forecast": {"at": iso(NOW), "window_5h_seconds": window_5h * 60, "window_7d_seconds": window_7d * 3600, "pools": pools}}
 
 
 def cc_cycle_starts(days):
@@ -2157,7 +2234,7 @@ def cc_key_usage_payload():
                                              "remaining_usd": 0 if settled else round(max(0, 100 - used), 2),
                                              "settled": settled, "partial": start < usage_from})
             keys.append(series)
-        pools.append({"id": pool["id"], "name": pool["name"], "keys": keys})
+        pools.append({"id": pool["id"], "name": pool["name"], "provider": pool.get("provider", "claude"), "keys": keys})
     return {"usage": {"at": iso(NOW), "from": iso(usage_from), "pools": pools}}
 
 
@@ -2195,8 +2272,8 @@ def cc_simulate_payload(body):
         approximations.append("new_key_profile")
     if body.get("changes"):
         approximations.append("quota_changes")
-    weighted = CC_SETTINGS.get("weights", {}).get("enabled")
-    return 200, {"simulation": {"pool_id": pool["id"], "from": iso(NOW - timedelta(days=40)), "to": iso(NOW),
+    weighted = CC_SETTINGS["providers"][pool.get("provider", "claude")]["weights"].get("enabled")
+    return 200, {"simulation": {"pool_id": pool["id"], "provider": pool.get("provider", "claude"), "from": iso(NOW - timedelta(days=40)), "to": iso(NOW),
                                 "conversion": {"basis": "weighted" if weighted else "raw", "factors": {"claude-fable-20261001": 3.92} if weighted else {}, "priced_models": []},
                                 "safety_factor": 0.9, "k": 6.02, "five_hour_enabled": True,
                                 "accounts": [{"auth_index": index, "weekly_usd": 272.1, "five_hour_usd": 45.2} for index in pool["auth_indexes"]],
@@ -2266,7 +2343,7 @@ def payload_for(path, query):
         summaries = cc_auth_summaries()
         files = auth_file_views(AUTH_FILES, query)
         for view in files:
-            if view["category"] == "claude" and view["auth_index"] in summaries:
+            if view["auth_index"] in summaries and view["category"] == summaries[view["auth_index"]]["provider"]:
                 view["cc"] = summaries[view["auth_index"]]
         return {"files": files}
     if path == f"{API_BASE}/panel-settings":
@@ -2384,7 +2461,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # Mirrors the plugin's catalog filtering for model rules; management asks for every model.
             payload = payload_for(parsed.path, query)
-            if self.headers.get("X-CPA-CC-Billing-Models", "").lower() != "all":
+            if self.headers.get("X-CPA-Super-Billing-Models", "").lower() != "all":
                 models, _, _, denied_models, _, _ = account_routing(api_keys.index(authorization[7:]))
                 payload["data"] = [row for row in payload["data"] if (not models or row["id"] in models) and row["id"] not in denied_models]
             self.send_json(200, payload)
@@ -2553,7 +2630,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"refreshed": True})
         elif route == ("POST", f"{API_BASE}/cc/calibrations"):
             body = json.loads(request_body or b"{}")
-            item = next((item for item in CC_SETTINGS.get("weights", {}).get("items", []) if item["id"] == body.get("item_id")), None)
+            item = next((item for item in CC_SETTINGS["providers"][cc_provider(body.get("auth_index"))]["weights"].get("items", [])
+                         if item["id"] == body.get("item_id")), None)
             if item is None or any(c["auth_index"] == body.get("auth_index") and not c.get("ended_at") for c in CC_CALIBRATIONS):
                 self.send_json(400, {"error": {"code": "invalid", "message": "Invalid calibration"}})
                 return

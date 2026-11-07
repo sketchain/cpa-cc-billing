@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-cc-billing/internal/ccbilling"
+	"cpa-super-billing/internal/ccbilling"
 )
 
 type panelResponse struct {
@@ -40,7 +40,8 @@ func TestPanelSettingsDefaultsAndValidation(t *testing.T) {
 		http.StatusBadRequest, nil)
 	callOK(t, app, http.MethodPut, routePanel, nil, map[string]any{"hidden_tabs": []string{"cc", "keys", "cc"}, "account_self_service": true},
 		http.StatusOK, &got)
-	if !slices.Equal(got.Settings.HiddenTabs, []string{"keys", "cc"}) {
+	// "cc" is the former id of the subscription split tab.
+	if !slices.Equal(got.Settings.HiddenTabs, []string{"keys", "split"}) {
 		t.Fatalf("hidden tabs = %v, want page order without duplicates", got.Settings.HiddenTabs)
 	}
 	// Hidden pages only affect the page: their management routes still answer.
@@ -64,6 +65,25 @@ func TestPanelSettingsSurviveRestart(t *testing.T) {
 	callOK(t, restarted, http.MethodGet, routePanel, nil, nil, http.StatusOK, &got)
 	if len(got.Settings.HiddenTabs) != 0 || got.Settings.AccountSelfService {
 		t.Fatalf("restored settings = %+v", got.Settings)
+	}
+}
+
+// Page settings saved while the subscription split was the "cc" tab keep it
+// hidden under its new id.
+func TestPanelSettingsMoveTheFormerSplitTab(t *testing.T) {
+	app, path := newAppWithPriceAndState(t, true)
+	app.Shutdown()
+	execSQL(t, path, `INSERT INTO cc_meta (key, value) VALUES ('panel_settings', '{"hidden_tabs":["cc","ai-providers"],"account_self_service":true}')
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+	restarted := newTestApp(t)
+	t.Cleanup(restarted.Shutdown)
+	if err := registerState(t, restarted, path); err != nil {
+		t.Fatal(err)
+	}
+	var got panelResponse
+	callOK(t, restarted, http.MethodGet, routePanel, nil, nil, http.StatusOK, &got)
+	if !slices.Equal(got.Settings.HiddenTabs, []string{"ai-providers", "split"}) {
+		t.Fatalf("hidden tabs = %v", got.Settings.HiddenTabs)
 	}
 }
 

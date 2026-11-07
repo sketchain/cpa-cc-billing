@@ -171,23 +171,25 @@ type PoolWindowForecast struct {
 	Block        Outcome `json:"block"`
 }
 
-// PoolForecast forecasts a pool and its accounts.
+// PoolForecast forecasts a pool and its accounts. Its spend is converted to
+// its provider's basis and discounted by its provider's safety factor.
 type PoolForecast struct {
-	ID       string             `json:"id"`
-	Name     string             `json:"name"`
-	Accounts []AccountForecast  `json:"accounts"`
-	FiveHour PoolWindowForecast `json:"five_hour"`
-	Week     PoolWindowForecast `json:"week"`
+	ID           string             `json:"id"`
+	Name         string             `json:"name"`
+	Provider     string             `json:"provider"`
+	SafetyFactor float64            `json:"safety_factor"`
+	Conversion   BasisConversion    `json:"conversion"`
+	Accounts     []AccountForecast  `json:"accounts"`
+	FiveHour     PoolWindowForecast `json:"five_hour"`
+	Week         PoolWindowForecast `json:"week"`
 }
 
 // Forecast is every pool's consumption forecast.
 type Forecast struct {
-	At           time.Time       `json:"at"`
-	Window5h     int64           `json:"window_5h_seconds"`
-	Window7d     int64           `json:"window_7d_seconds"`
-	SafetyFactor float64         `json:"safety_factor"`
-	Conversion   BasisConversion `json:"conversion"`
-	Pools        []PoolForecast  `json:"pools"`
+	At       time.Time      `json:"at"`
+	Window5h int64          `json:"window_5h_seconds"`
+	Window7d int64          `json:"window_7d_seconds"`
+	Pools    []PoolForecast `json:"pools"`
 }
 
 type accountPoints struct {
@@ -206,9 +208,7 @@ func (m *Manager) Forecast(options ForecastOptions) (Forecast, error) {
 	}
 	now := m.host.Now()
 	w5, w7 := options.Window5h, options.Window7d
-	conversion := NewBasisConversion(estimates, options.Prices)
-	result := Forecast{At: now, Window5h: int64(w5 / time.Second), Window7d: int64(w7 / time.Second),
-		SafetyFactor: snap.settings.Params.SafetyFactor, Conversion: conversion, Pools: []PoolForecast{}}
+	result := Forecast{At: now, Window5h: int64(w5 / time.Second), Window7d: int64(w7 / time.Second), Pools: []PoolForecast{}}
 	type windowKey struct {
 		authIndex string
 		length    time.Duration
@@ -237,10 +237,11 @@ func (m *Manager) Forecast(options ForecastOptions) (Forecast, error) {
 				for _, window := range []struct{ length, span time.Duration }{{FiveHours, w5}, {Week, w7}} {
 					var entry accountPoints
 					from := now.Add(-window.span)
-					if entry.before, entry.hasBefore, err = lastWindowPoint(db, index, window.length, from); err != nil {
+					source := snap.settings.accountSource(index)
+					if entry.before, entry.hasBefore, err = lastWindowPoint(db, source, index, window.length, from); err != nil {
 						return err
 					}
-					if entry.points, err = readWindowPoints(db, index, window.length, from, now); err != nil {
+					if entry.points, err = readWindowPoints(db, source, index, window.length, from, now); err != nil {
 						return err
 					}
 					history[windowKey{index, window.length}] = entry
@@ -253,10 +254,12 @@ func (m *Manager) Forecast(options ForecastOptions) (Forecast, error) {
 		return Forecast{}, err
 	}
 	latest, deltas := m.live(snap)
-	safety := snap.settings.Params.SafetyFactor
 	for _, pool := range snap.settings.Pools {
 		status := poolStatus(snap, latest, deltas, pool, now)
-		forecast := PoolForecast{ID: pool.ID, Name: pool.Name, Accounts: []AccountForecast{}}
+		safety := snap.settings.ParamsFor(pool.Provider).SafetyFactor
+		conversion := NewBasisConversion(estimates.For(pool.Provider), options.Prices)
+		forecast := PoolForecast{ID: pool.ID, Name: pool.Name, Provider: pool.Provider, SafetyFactor: safety, Conversion: conversion,
+			Accounts: []AccountForecast{}}
 		inPool := map[string]bool{}
 		for _, index := range pool.AuthIndexes {
 			inPool[index] = true

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 // Estimate bases.
@@ -78,27 +78,46 @@ type weightCache struct {
 }
 
 // refreshWeights needs refreshMu and runs within withDB after the accounts
-// advanced. It estimates the multipliers, settles calibrations and resolves
-// the effective multipliers.
-func (m *Manager) refreshWeights(db *sql.DB, now time.Time) (weightsSnapshot, error) {
-	settings := m.settings
+// advanced. Each provider's accounts have their own multipliers: it estimates
+// them, settles calibrations and resolves the effective multipliers.
+func (m *Manager) refreshWeights(db *sql.DB, now time.Time) (map[string]weightsSnapshot, error) {
+	calibrations, err := loadCalibrations(db)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]weightsSnapshot{}
+	for _, provider := range Providers {
+		var own []Calibration
+		for _, calibration := range calibrations {
+			if m.settings.AccountProvider(calibration.AuthIndex) == provider {
+				own = append(own, calibration)
+			}
+		}
+		weights, err := m.refreshProviderWeights(db, provider, own, now)
+		if err != nil {
+			return nil, err
+		}
+		result[provider] = weights
+	}
+	return result, nil
+}
+
+func (m *Manager) refreshProviderWeights(db *sql.DB, provider string, calibrations []Calibration, now time.Time) (weightsSnapshot, error) {
+	settings := m.settings.provider(provider).Weights
+	params := m.settings.ParamsFor(provider)
 	result := weightsSnapshot{basis: BasisRaw}
-	if settings.Weights.Enabled {
+	if settings.Enabled {
 		result.basis = BasisWeighted
 	}
-	indexes := settings.authIndexes()
+	indexes := m.settings.providerAccounts(provider)
 	accounts := make([]AccountSegments, 0, len(indexes))
 	for _, index := range indexes {
 		accounts = append(accounts, AccountSegments{AuthIndex: index, Segments: m.accounts[index].segments})
 	}
-	result.models, result.unsplit, result.segments = modelUsage(accounts, settings.Weights)
+	result.models, result.unsplit, result.segments = modelUsage(accounts, settings)
 
-	calibrations, err := loadCalibrations(db)
-	if err != nil {
-		return result, err
-	}
 	tested := map[string]bool{}
-	for _, item := range settings.Weights.Items {
+	for _, item := range settings.Items {
 		for _, model := range item.Models {
 			tested[model] = true
 		}
@@ -121,7 +140,7 @@ func (m *Manager) refreshWeights(db *sql.DB, now time.Time) (weightsSnapshot, er
 		for _, model := range calibration.Item.Models {
 			models[model] = true
 		}
-		calibration.Result = calibrate(cache.segments, calibration.Item, models, calibration.StartedAt, end, settings.Params)
+		calibration.Result = calibrate(cache.segments, calibration.Item, models, calibration.StartedAt, end, params)
 		if calibration.Running() {
 			calibration.Result.Status = CalibrationRunning
 			continue
@@ -136,24 +155,28 @@ func (m *Manager) refreshWeights(db *sql.DB, now time.Time) (weightsSnapshot, er
 	}
 	result.calibrations = calibrations
 
-	key := weightCacheKey(settings, accounts)
-	if key == m.weightCache.key && now.Sub(m.weightCache.at) < weightRecompute && !now.Before(m.weightCache.at) {
-		result.estimate = m.weightCache.estimate
-	} else {
-		result.estimate = EstimateWeights(accounts, settings.Weights, settings.Params, now)
-		m.weightCache = weightCache{key: key, at: now, estimate: result.estimate}
+	key := weightCacheKey(params, settings, accounts)
+	if m.weightCache == nil {
+		m.weightCache = map[string]weightCache{}
 	}
-	result.effective = resolveWeights(settings.Weights, result.estimate, calibrations)
+	cached := m.weightCache[provider]
+	if key == cached.key && now.Sub(cached.at) < weightRecompute && !now.Before(cached.at) {
+		result.estimate = cached.estimate
+	} else {
+		result.estimate = EstimateWeights(accounts, settings, params, now)
+		m.weightCache[provider] = weightCache{key: key, at: now, estimate: result.estimate}
+	}
+	result.effective = resolveWeights(settings, result.estimate, calibrations)
 	multipliers := make([]float64, len(result.effective))
 	for i, weight := range result.effective {
 		multipliers[i] = weight.Multiplier
 	}
-	result.factors = weightFactors(settings.Weights.Items, multipliers)
+	result.factors = weightFactors(settings.Items, multipliers)
 	return result, nil
 }
 
 // weightCacheKey changes whenever the estimate's inputs other than the clock do.
-func weightCacheKey(settings Settings, accounts []AccountSegments) string {
+func weightCacheKey(params Params, settings WeightSettings, accounts []AccountSegments) string {
 	var builder strings.Builder
 	raw, _ := json.Marshal(struct {
 		Params Params
@@ -161,7 +184,7 @@ func weightCacheKey(settings Settings, accounts []AccountSegments) string {
 		Min    int
 		Cost   float64
 		Spread float64
-	}{settings.Params, settings.Weights.Items, settings.Weights.MinSegments, settings.Weights.MinCostUSD, settings.Weights.MinShareSpread})
+	}{params, settings.Items, settings.MinSegments, settings.MinCostUSD, settings.MinShareSpread})
 	builder.Write(raw)
 	for _, account := range accounts {
 		builder.WriteString("\x00" + account.AuthIndex)
@@ -298,8 +321,16 @@ func emptyWeightsView() WeightsView {
 		Calibrations: []Calibration{}, Models: []ModelUsage{}, Comparison: []BasisComparison{}}
 }
 
+func emptyWeightsViews() map[string]WeightsView {
+	result := map[string]WeightsView{}
+	for _, provider := range Providers {
+		result[provider] = emptyWeightsView()
+	}
+	return result
+}
+
 func basisValues(authIndex string, settings Settings, estimate Estimate, account accountSnapshot, latest Observation, now time.Time) BasisValues {
-	status := ResolveAccount(authIndex, settings.Accounts[authIndex], estimate, account.k, latest, settings.Params, now)
+	status := ResolveAccount(authIndex, settings.Accounts[authIndex], estimate, account.k, latest, settings.accountParams(authIndex), now)
 	values := BasisValues{Ratio: estimate.Ratio, FiveHourUSD: status.FiveHourTotal, WeeklyUSD: status.WeeklyTotal, TotalsFrom: status.TotalsFrom,
 		Segments: estimate.Segments, ExcludedSegments: estimate.ExcludedSegments, CleanBlocks: estimate.CleanBlocks}
 	if estimate.Ratio > 0 {
@@ -308,10 +339,21 @@ func basisValues(authIndex string, settings Settings, estimate Estimate, account
 	return values
 }
 
-func weightsView(snap *snapshot, latest map[string]Observation, now time.Time) WeightsView {
+// weightsViews is each provider's quota weights.
+func weightsViews(snap *snapshot, latest map[string]Observation, now time.Time) map[string]WeightsView {
+	result := map[string]WeightsView{}
+	for _, provider := range Providers {
+		result[provider] = weightsView(snap, provider, latest, now)
+	}
+	return result
+}
+
+func weightsView(snap *snapshot, provider string, latest map[string]Observation, now time.Time) WeightsView {
 	view := emptyWeightsView()
-	weights := snap.weights
-	view.Basis = weights.basis
+	weights := snap.weights[provider]
+	if weights.basis != "" {
+		view.Basis = weights.basis
+	}
 	if weights.estimate.Items != nil {
 		view.Estimate = weights.estimate
 	}
@@ -325,7 +367,7 @@ func weightsView(snap *snapshot, latest map[string]Observation, now time.Time) W
 		view.Models = weights.models
 	}
 	view.UnsplitSegments, view.Segments = weights.unsplit, weights.segments
-	for _, index := range snap.settings.authIndexes() {
+	for _, index := range snap.settings.providerAccounts(provider) {
 		account := snap.accounts[index]
 		view.Comparison = append(view.Comparison, BasisComparison{AuthIndex: index,
 			Raw:      basisValues(index, snap.settings, account.raw, account, latest[index], now),
@@ -337,6 +379,7 @@ func weightsView(snap *snapshot, latest map[string]Observation, now time.Time) W
 // AccountEstimate is an account's estimate on the basis in effect.
 type AccountEstimate struct {
 	AuthIndex string `json:"auth_index"`
+	Provider  string `json:"provider"`
 	BasisValues
 	K          *float64  `json:"k,omitempty"`
 	KSource    string    `json:"k_source"`
@@ -348,13 +391,28 @@ type AccountEstimate struct {
 	ObservedAt time.Time `json:"observed_at,omitzero"`
 }
 
-// Estimates is every configured account's estimate on the basis in effect,
-// with the multipliers that basis uses.
+// ProviderWeights is the basis one provider's estimates are on and the
+// multipliers that basis uses.
+type ProviderWeights struct {
+	Basis   string            `json:"basis"`
+	Weights []EffectiveWeight `json:"weights"`
+}
+
+// Estimates is every configured account's estimate on the basis in effect
+// for its provider, with the multipliers each basis uses.
 type Estimates struct {
-	At       time.Time                  `json:"at"`
-	Basis    string                     `json:"basis"`
-	Weights  []EffectiveWeight          `json:"weights"`
-	Accounts map[string]AccountEstimate `json:"accounts"`
+	At        time.Time                  `json:"at"`
+	Providers map[string]ProviderWeights `json:"providers"`
+	Accounts  map[string]AccountEstimate `json:"accounts"`
+}
+
+// For is the basis and multipliers of one provider's estimates.
+func (e Estimates) For(provider string) ProviderWeights {
+	weights, ok := e.Providers[provider]
+	if !ok || weights.Basis == "" {
+		return ProviderWeights{Basis: BasisRaw, Weights: []EffectiveWeight{}}
+	}
+	return weights
 }
 
 // Estimates returns the estimates of the latest snapshot on the basis in
@@ -368,17 +426,22 @@ func (m *Manager) Estimates() (Estimates, bool) {
 	}
 	now := m.host.Now()
 	latest, _ := m.live(snap)
-	result := Estimates{At: snap.at, Basis: snap.weights.basis, Weights: slices.Clone(snap.weights.effective), Accounts: map[string]AccountEstimate{}}
-	if result.Basis == "" {
-		result.Basis = BasisRaw
-	}
-	if result.Weights == nil {
-		result.Weights = []EffectiveWeight{}
+	result := Estimates{At: snap.at, Providers: map[string]ProviderWeights{}, Accounts: map[string]AccountEstimate{}}
+	for _, provider := range Providers {
+		weights := snap.weights[provider]
+		entry := ProviderWeights{Basis: weights.basis, Weights: slices.Clone(weights.effective)}
+		if entry.Basis == "" {
+			entry.Basis = BasisRaw
+		}
+		if entry.Weights == nil {
+			entry.Weights = []EffectiveWeight{}
+		}
+		result.Providers[provider] = entry
 	}
 	for _, index := range snap.settings.authIndexes() {
 		account := snap.accounts[index]
 		status := accountStatus(snap, latest, index, now)
-		result.Accounts[index] = AccountEstimate{AuthIndex: index,
+		result.Accounts[index] = AccountEstimate{AuthIndex: index, Provider: status.Provider,
 			BasisValues: basisValues(index, snap.settings, account.estimate, account, latest[index], now),
 			K:           status.K, KSource: status.KSource, ColdStart: status.ColdStart, Used5h: status.Used5h, Used7d: status.Used7d,
 			Reset5h: status.Reset5h, Reset7d: status.Reset7d, ObservedAt: status.ObservedAt}
@@ -393,12 +456,12 @@ func (m *Manager) StartCalibration(itemID, authIndex string) (Calibration, error
 	defer m.refreshMu.Unlock()
 	var calibration Calibration
 	err := m.withDB(func(db *sql.DB) error {
-		item, ok := m.settings.Weights.item(itemID)
-		if !ok {
-			return invalidf("Model test item %q does not exist", itemID)
-		}
 		if !slices.Contains(m.settings.authIndexes(), authIndex) {
 			return invalidf("Account %q is not configured in the CC split", authIndex)
+		}
+		item, ok := m.settings.provider(m.settings.AccountProvider(authIndex)).Weights.item(itemID)
+		if !ok {
+			return invalidf("Model test item %q does not exist", itemID)
 		}
 		existing, err := loadCalibrations(db)
 		if err != nil {

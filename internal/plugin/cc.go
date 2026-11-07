@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
-	"cpa-cc-billing/internal/ccbilling"
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/billing"
+	"cpa-super-billing/internal/ccbilling"
+	"cpa-super-billing/internal/messages"
 )
 
 // This file wires the CC split (internal/ccbilling) into the plugin. Upstream
@@ -90,28 +90,34 @@ func (h *ccHost) ToUSD(amount float64, currency string) float64 {
 	return rate.Convert(amount, billing.Currency(currency), billing.USD)
 }
 
-func (h *ccHost) LatestObservations(authIndexes []string, since time.Time) (map[string]ccbilling.Observation, error) {
-	if len(authIndexes) == 0 {
+func (h *ccHost) LatestObservations(sources map[string]ccbilling.QuotaSource, since time.Time) (map[string]ccbilling.Observation, error) {
+	if len(sources) == 0 {
 		return map[string]ccbilling.Observation{}, nil
 	}
-	reports, err := h.app.store.LatestQuotaReports(authIndexes, since)
+	reports, err := h.app.store.LatestQuotaReports(slices.Sorted(maps.Keys(sources)), since)
 	if err != nil {
 		return nil, err
 	}
 	result := make(map[string]ccbilling.Observation, len(reports))
 	for index, observations := range reports {
 		var merged ccbilling.Observation
+		var creditsAt time.Time
 		for _, observation := range observations {
-			if obs, ok := ccObservation(observation.QuotaReport, observation.At); ok {
-				if obs.Has5h {
-					merged.Has5h, merged.Used5h, merged.Reset5h = true, obs.Used5h, obs.Reset5h
-				}
-				if obs.Has7d {
-					merged.Has7d, merged.Used7d, merged.Reset7d = true, obs.Used7d, obs.Reset7d
-				}
-				if obs.At.After(merged.At) {
-					merged.At = obs.At
-				}
+			obs, ok := ccObservation(observation.QuotaReport, sources[index], observation.At)
+			if obs.HasCredits && !observation.At.Before(creditsAt) {
+				merged.HasCredits, merged.Credits, creditsAt = true, obs.Credits, observation.At
+			}
+			if !ok {
+				continue
+			}
+			if obs.Has5h {
+				merged.Has5h, merged.Used5h, merged.Reset5h = true, obs.Used5h, obs.Reset5h
+			}
+			if obs.Has7d {
+				merged.Has7d, merged.Used7d, merged.Reset7d = true, obs.Used7d, obs.Reset7d
+			}
+			if obs.At.After(merged.At) {
+				merged.At = obs.At
 			}
 		}
 		if merged.Has5h || merged.Has7d {
@@ -121,13 +127,13 @@ func (h *ccHost) LatestObservations(authIndexes []string, since time.Time) (map[
 	return result, nil
 }
 
-func (h *ccHost) WeeklyPeriod(authIndex string, now time.Time) (ccbilling.WeeklyPeriod, bool, error) {
-	histories, err := h.app.store.QuotaWindowHistories(authIndex, "claude", now.Add(-ccbilling.Week-24*time.Hour), now.Add(time.Second))
+func (h *ccHost) WeeklyPeriod(authIndex string, source ccbilling.QuotaSource, now time.Time) (ccbilling.WeeklyPeriod, bool, error) {
+	histories, err := h.app.store.QuotaWindowHistories(authIndex, source.Provider, now.Add(-ccbilling.Week-24*time.Hour), now.Add(time.Second))
 	if err != nil {
 		return ccbilling.WeeklyPeriod{}, false, err
 	}
 	for _, history := range histories {
-		if history.LimitKey != claudeUnifiedLimit || history.Seconds != weekSeconds {
+		if history.LimitKey != source.LimitKey || history.Seconds != weekSeconds {
 			continue
 		}
 		periods := billing.QuotaWindowPeriods(ccbilling.Week, history.Reports, now)
@@ -223,14 +229,20 @@ func (a *App) ccConfigured() {
 	}
 }
 
-// ccObservation reads the unified Claude windows of a quota report.
-func ccObservation(report billing.QuotaReport, at time.Time) (ccbilling.Observation, bool) {
-	if !strings.EqualFold(report.Provider, "claude") {
+// ccObservation reads the main windows of a quota report from the source of
+// the account it belongs to: the provider's main limit (Claude's unified
+// limit, ChatGPT's Codex limit), the credit balance and whether the limit is
+// used up. The second result reports whether it has a main window.
+func ccObservation(report billing.QuotaReport, source ccbilling.QuotaSource, at time.Time) (ccbilling.Observation, bool) {
+	if source.Provider == "" || !strings.EqualFold(report.Provider, source.Provider) {
 		return ccbilling.Observation{}, false
 	}
 	obs := ccbilling.Observation{At: at}
+	if balance, err := strconv.ParseFloat(strings.TrimSpace(report.CreditBalance), 64); err == nil && !math.IsNaN(balance) && !math.IsInf(balance, 0) {
+		obs.HasCredits, obs.Credits = true, balance
+	}
 	for _, window := range report.Windows {
-		if window.LimitKey != claudeUnifiedLimit {
+		if window.LimitKey != source.LimitKey {
 			continue
 		}
 		switch window.Seconds {
@@ -240,6 +252,7 @@ func ccObservation(report billing.QuotaReport, at time.Time) (ccbilling.Observat
 			obs.Has7d, obs.Used7d, obs.Reset7d = true, window.UsedPercent, window.ResetAt
 		}
 	}
+	obs.LimitReached = report.LimitReached && (obs.Has5h || obs.Has7d)
 	return obs, obs.Has5h || obs.Has7d
 }
 
@@ -251,7 +264,11 @@ func (a *App) ccObserve(authIndex string, report *billing.QuotaReport, at time.T
 	if at.IsZero() {
 		at = a.store.Now()
 	}
-	if obs, ok := ccObservation(*report, at); ok {
+	source, configured := a.cc.AccountSource(authIndex)
+	if !configured {
+		return
+	}
+	if obs, ok := ccObservation(*report, source, at); ok {
 		a.cc.Observe(authIndex, obs)
 	}
 }
@@ -294,6 +311,91 @@ type ccCredential struct {
 	AuthIndex string `json:"auth_index"`
 	Name      string `json:"name"`
 	Disabled  bool   `json:"disabled"`
+	Provider  string `json:"provider"`
+	// Plan is the subscription plan the account's latest quota report named;
+	// SuggestedTier is the tier it corresponds to.
+	Plan          string `json:"plan,omitempty"`
+	SuggestedTier string `json:"suggested_tier,omitempty"`
+}
+
+// ccKeyRouting flags an assigned key whose routing rules let it reach
+// credentials of another provider than its pool's. It is a hint only: the
+// split does not refuse such requests.
+type ccKeyRouting struct {
+	Scope    string `json:"scope"`
+	Provider string `json:"provider"`
+	// Unrestricted means the rules do not restrict credentials at all.
+	Unrestricted bool `json:"unrestricted"`
+}
+
+// ccProviderOf is the split provider of a host credential, "" for other
+// providers.
+func ccProviderOf(file hostAuthFile) string {
+	provider := strings.ToLower(strings.TrimSpace(file.Provider))
+	if provider == "" {
+		provider = strings.ToLower(strings.TrimSpace(file.Type))
+	}
+	if slices.Contains(ccbilling.Providers, provider) {
+		return provider
+	}
+	return ""
+}
+
+// ccRoutingHints lists the assigned keys whose routing rules do not keep
+// them on their pool's provider.
+func (a *App) ccRoutingHints(settings ccbilling.Settings, files []hostAuthFile) []ccKeyRouting {
+	hints := []ccKeyRouting{}
+	for _, scope := range slices.Sorted(maps.Keys(settings.Keys)) {
+		key := settings.Keys[scope]
+		var provider string
+		for _, pool := range settings.Pools {
+			if pool.ID == key.PoolID {
+				provider = pool.Provider
+			}
+		}
+		if provider == "" {
+			continue
+		}
+		decision := a.store.ResolveRouting(scope, "", "")
+		if !decision.RestrictsCredentials() {
+			hints = append(hints, ccKeyRouting{Scope: scope, Provider: provider, Unrestricted: true})
+			continue
+		}
+		if a.ccRoutingReachesOthers(decision, provider, files) {
+			hints = append(hints, ccKeyRouting{Scope: scope, Provider: provider})
+		}
+	}
+	return hints
+}
+
+func (a *App) ccRoutingReachesOthers(decision billing.RoutingDecision, provider string, files []hostAuthFile) bool {
+	for _, selector := range decision.CredentialProviders {
+		if !strings.EqualFold(selector.Provider, provider) {
+			return true
+		}
+	}
+	if len(decision.CredentialIDs) == 0 && len(decision.CredentialProviders) == 0 {
+		// Only denials: every credential they leave is allowed, including
+		// configured API keys of other providers.
+		return true
+	}
+	for _, file := range files {
+		other := strings.ToLower(strings.TrimSpace(file.Provider))
+		if other == "" {
+			other = strings.ToLower(strings.TrimSpace(file.Type))
+		}
+		if other != provider && routingAllowsAuthFile(file, decision) {
+			return true
+		}
+	}
+	a.routingMu.Lock()
+	defer a.routingMu.Unlock()
+	for _, ref := range decision.CredentialIDs {
+		if view, known := a.credentials[ref]; known && view.Provider != "" && !strings.EqualFold(view.Provider, provider) {
+			return true
+		}
+	}
+	return false
 }
 
 type ccKeyOption struct {
@@ -311,16 +413,27 @@ func (a *App) ccView(_ ManagementRequest) ManagementResponse {
 	}
 	credentials := []ccCredential{}
 	var warning string
-	if files, errFiles := a.listHostAuthFiles(); errFiles == nil {
+	files, errFiles := a.listHostAuthFiles()
+	if errFiles == nil {
+		var indexes []string
 		for _, file := range files {
-			provider := strings.ToLower(strings.TrimSpace(file.Provider))
-			if provider == "" {
-				provider = strings.ToLower(strings.TrimSpace(file.Type))
-			}
-			if provider != "claude" || strings.TrimSpace(file.AuthIndex) == "" {
+			provider := ccProviderOf(file)
+			if provider == "" || strings.TrimSpace(file.AuthIndex) == "" {
 				continue
 			}
-			credentials = append(credentials, ccCredential{AuthIndex: file.AuthIndex, Name: authFileTitle(file), Disabled: file.Disabled})
+			credentials = append(credentials, ccCredential{AuthIndex: file.AuthIndex, Name: authFileTitle(file), Disabled: file.Disabled, Provider: provider})
+			indexes = append(indexes, file.AuthIndex)
+		}
+		if reports, err := a.store.LatestQuotaReports(indexes, a.store.Now().Add(-30*24*time.Hour)); err == nil {
+			for i := range credentials {
+				var planAt time.Time
+				for _, observation := range reports[credentials[i].AuthIndex] {
+					if observation.Plan != "" && strings.EqualFold(observation.Provider, credentials[i].Provider) && !observation.At.Before(planAt) {
+						credentials[i].Plan, planAt = observation.Plan, observation.At
+					}
+				}
+				credentials[i].SuggestedTier = ccbilling.SuggestedTier(credentials[i].Provider, credentials[i].Plan)
+			}
 		}
 	} else {
 		warning = errFiles.Error()
@@ -339,8 +452,10 @@ func (a *App) ccView(_ ManagementRequest) ManagementResponse {
 		keys = append(keys, option)
 	}
 	var models []string
-	for _, item := range view.Settings.Weights.Items {
-		models = append(models, item.Models...)
+	for _, provider := range ccbilling.Providers {
+		for _, item := range view.Settings.Providers[provider].Weights.Items {
+			models = append(models, item.Models...)
+		}
 	}
 	prices := map[string]billing.PriceMultiplier{}
 	var priceWarning string
@@ -349,8 +464,16 @@ func (a *App) ccView(_ ManagementRequest) ManagementResponse {
 			prices, priceWarning = map[string]billing.PriceMultiplier{}, err.Error()
 		}
 	}
-	return JSONResponse(http.StatusOK, map[string]any{"cc": view, "credentials": credentials, "key_options": keys, "credential_warning": warning,
-		"price_multipliers": prices, "price_warning": priceWarning})
+	routing := []ccKeyRouting{}
+	if errFiles == nil {
+		routing = a.ccRoutingHints(view.Settings, files)
+	}
+	body := map[string]any{"cc": view, "credentials": credentials, "key_options": keys, "credential_warning": warning,
+		"price_multipliers": prices, "price_warning": priceWarning, "key_routing": routing}
+	if legacy, ok := a.store.LegacyDatabaseNotice(); ok {
+		body["legacy_database"] = legacy
+	}
+	return JSONResponse(http.StatusOK, body)
 }
 
 // ccCalibrationError maps a calibration error to its response.
@@ -428,12 +551,16 @@ func ccInsightError(err error) ManagementResponse {
 func (a *App) ccPriceMultipliers() map[string]float64 {
 	estimates, ok := a.cc.Estimates()
 	result := map[string]float64{}
-	if !ok || estimates.Basis != ccbilling.BasisWeighted {
+	if !ok {
 		return result
 	}
 	var models []string
-	for _, weight := range estimates.Weights {
-		models = append(models, weight.Models...)
+	for _, provider := range ccbilling.Providers {
+		if weights := estimates.For(provider); weights.Basis == ccbilling.BasisWeighted {
+			for _, weight := range weights.Weights {
+				models = append(models, weight.Models...)
+			}
+		}
 	}
 	if len(models) == 0 {
 		return result
@@ -528,11 +655,55 @@ func (a *App) ccPutSettings(req ManagementRequest) ManagementResponse {
 	if err := decodeStrict(req.Body, &settings); err != nil {
 		return errorResponse(err)
 	}
+	if err := a.ccCheckPoolProviders(settings); err != nil {
+		return jsonMessageError(http.StatusBadRequest, "invalid", messages.FromError(err))
+	}
 	stored, err := a.cc.SetSettings(settings)
 	if err != nil {
 		return jsonMessageError(http.StatusBadRequest, "invalid", messages.FromError(err))
 	}
 	return JSONResponse(http.StatusOK, map[string]any{"settings": stored})
+}
+
+// ccCheckPoolProviders refuses a pool holding an account of another provider
+// than the pool's, as the host's credential list tells it. Accounts the host
+// does not list, such as deleted ones, cannot be checked and are kept.
+func (a *App) ccCheckPoolProviders(settings ccbilling.Settings) error {
+	files, err := a.listHostAuthFiles()
+	if err != nil {
+		return nil
+	}
+	known := map[string]hostAuthFile{}
+	for _, file := range files {
+		if index := strings.TrimSpace(file.AuthIndex); index != "" {
+			known[index] = file
+		}
+	}
+	for _, pool := range settings.Pools {
+		provider := strings.TrimSpace(pool.Provider)
+		if provider == "" {
+			provider = ccbilling.ProviderClaude
+		}
+		label := strings.TrimSpace(pool.Name)
+		if label == "" {
+			label = strings.TrimSpace(pool.ID)
+		}
+		for _, index := range pool.AuthIndexes {
+			file, listed := known[strings.TrimSpace(index)]
+			if !listed {
+				continue
+			}
+			if actual := ccProviderOf(file); actual != provider {
+				kind := ccbilling.ProviderLabel(actual)
+				if actual == "" {
+					kind = strings.TrimSpace(file.Provider)
+				}
+				return messages.Errorf("Account %s is a %s account; pool %q only holds %s accounts",
+					authFileTitle(file), kind, label, ccbilling.ProviderLabel(provider))
+			}
+		}
+	}
+	return nil
 }
 
 func (a *App) ccRefresh(_ ManagementRequest) ManagementResponse {
@@ -713,7 +884,7 @@ func (a *App) ccAttachAuthFiles(views []authFileView) {
 	}
 	summaries := a.cc.AccountSummaries()
 	for i := range views {
-		if summary, ok := summaries[views[i].AuthIndex]; ok && views[i].Category == "claude" {
+		if summary, ok := summaries[views[i].AuthIndex]; ok && strings.EqualFold(views[i].Category, summary.Provider) {
 			views[i].CC = &summary
 		}
 	}

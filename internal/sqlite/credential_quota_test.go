@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func TestQuotaReportsReadNewestValuesAndWindowHistories(t *testing.T) {

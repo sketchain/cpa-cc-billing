@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
-	"cpa-cc-billing/internal/ccbilling"
+	"cpa-super-billing/internal/billing"
+	"cpa-super-billing/internal/ccbilling"
 )
 
 var backupClock = time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
@@ -90,11 +90,11 @@ func backupNames(t *testing.T, path string) []string {
 }
 
 func TestOpenBacksUpTheWholeDatabaseBeforeMigrating(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cpa-cc-billing-state-v1.db")
+	path := filepath.Join(t.TempDir(), "cpa-super-billing-state-v1.db")
 	seedV24(t, path)
 
 	database := openWith(t, path, withCC(), atTime(backupClock))
-	want := "cpa-cc-billing-state-v1.db.bak-u24-to-u25-cc4-20261107T120000"
+	want := "cpa-super-billing-state-v1.db.bak-u24-to-u25-cc4-20261107T120000"
 	if names := backupNames(t, path); !slices.Equal(names, []string{want}) {
 		t.Fatalf("backups = %v, want [%s]", names, want)
 	}
@@ -362,5 +362,53 @@ func TestMigrationBackupIncludesTheWriteAheadLog(t *testing.T) {
 	copy := readOnly(t, filepath.Join(filepath.Dir(path), "state.db.bak-u24-to-u25-cc4-20261107T120000"))
 	if keys := intQuery(t, copy, "SELECT count(*) FROM api_keys"); keys != 2 {
 		t.Fatalf("backup has %d keys, want the 2 including the one only in the write-ahead log", keys)
+	}
+}
+
+// CopyDatabase copies a database, including what only its write-ahead log
+// holds, without changing the source, and refuses to overwrite a file.
+func TestCopyDatabaseCopiesTheWriteAheadLogAndLeavesTheSource(t *testing.T) {
+	dir := t.TempDir()
+	source, target := filepath.Join(dir, "old.db"), filepath.Join(dir, "plugins", "new.db")
+	openWith(t, source, withCC()).Close()
+	writer, err := sql.Open("sqlite3", (&url.URL{Scheme: "file", Path: source, OmitHost: true}).String()+"?_journal_mode=WAL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	writer.SetMaxOpenConns(1)
+	if _, err := writer.Exec(`PRAGMA wal_autocheckpoint = 0; INSERT INTO api_keys (scope) VALUES ('only-in-wal');`); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CopyDatabase(source, target); err != nil {
+		t.Fatalf("CopyDatabase error = %v", err)
+	}
+	copied := readOnly(t, target)
+	if keys := intQuery(t, copied, "SELECT count(*) FROM api_keys WHERE scope = 'only-in-wal'"); keys != 1 {
+		t.Fatalf("copy has %d rows from the write-ahead log, want 1", keys)
+	}
+	if version := intQuery(t, copied, "PRAGMA user_version"); version != schemaVersion {
+		t.Fatalf("copy format = %d, want %d", version, schemaVersion)
+	}
+	after, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("CopyDatabase changed the source file")
+	}
+	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("copy mode = %v, %v; want 0600", info, err)
+	}
+	if err := CopyDatabase(source, target); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("second CopyDatabase error = %v, want a refusal to overwrite", err)
+	}
+	if _, err := os.Stat(target + ".partial"); !os.IsNotExist(err) {
+		t.Fatalf("partial file left behind: %v", err)
 	}
 }

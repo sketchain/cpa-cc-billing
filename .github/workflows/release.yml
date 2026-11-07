@@ -195,8 +195,8 @@ jobs:
           mkdir -p dist
           CGO_ENABLED=1 GOOS=darwin GOARCH="$TARGET_ARCH" \
             go build -buildvcs=false -tags cshared -buildmode=c-shared \
-            -o dist/cpa-cc-billing.dylib ./cmd/cpa-cc-billing
-          rm -f dist/cpa-cc-billing.h
+            -o dist/cpa-super-billing.dylib ./cmd/cpa-super-billing
+          rm -f dist/cpa-super-billing.h
 
       - name: Build Linux plugin with manylinux2014
         if: matrix.os == 'linux'
@@ -224,9 +224,9 @@ jobs:
               CGO_ENABLED=1 GOOS=linux GOARCH="$TARGET_ARCH" \
                 go build -buildvcs=false -trimpath -ldflags="-s -w -buildid=" \
                 -tags cshared -buildmode=c-shared \
-                -o dist/cpa-cc-billing.so ./cmd/cpa-cc-billing
+                -o dist/cpa-super-billing.so ./cmd/cpa-super-billing
             '
-          rm -f dist/cpa-cc-billing.h
+          rm -f dist/cpa-super-billing.h
 
       - name: Build Windows plugin
         if: matrix.os == 'windows'
@@ -260,11 +260,11 @@ jobs:
           $env:CGO_CFLAGS = "-O2 -g -march=$($env:TARGET_MARCH)"
           go build -buildvcs=false -trimpath -ldflags="-s -w -buildid=" `
             -tags cshared -buildmode=c-shared `
-            -o dist/cpa-cc-billing.dll ./cmd/cpa-cc-billing
+            -o dist/cpa-super-billing.dll ./cmd/cpa-super-billing
           if ($LASTEXITCODE -ne 0) {
             throw "Windows plugin build failed"
           }
-          Remove-Item dist/cpa-cc-billing.h -Force -ErrorAction SilentlyContinue
+          Remove-Item dist/cpa-super-billing.h -Force -ErrorAction SilentlyContinue
 
       - name: Save Windows Go build cache
         if: matrix.os == 'windows' && steps.windows-go-build-cache.outputs.cache-hit != 'true'
@@ -281,7 +281,7 @@ jobs:
           EXTENSION: ${{ matrix.extension }}
           TARGET_GO_CPU: ${{ matrix.go_cpu }}
         run: |
-          binary="dist/cpa-cc-billing.${EXTENSION}"
+          binary="dist/cpa-super-billing.${EXTENSION}"
           test -s "$binary"
           file "$binary"
           if [ -n "$TARGET_GO_CPU" ]; then
@@ -289,12 +289,12 @@ jobs:
           fi
           version="${RELEASE_TAG#v}"
 
-          release_archive="cpa-cc-billing_${version}_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
-          tar -czf "$release_archive" -C dist "cpa-cc-billing.${EXTENSION}"
+          release_archive="cpa-super-billing_${version}_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
+          tar -czf "$release_archive" -C dist "cpa-super-billing.${EXTENSION}"
 
-          store_archive="cpa-cc-billing_${version}_${TARGET_OS}_${TARGET_ARCH}.zip"
+          store_archive="cpa-super-billing_${version}_${TARGET_OS}_${TARGET_ARCH}.zip"
           zip -j "$store_archive" "$binary"
-          test "$(unzip -Z1 "$store_archive")" = "cpa-cc-billing.${EXTENSION}"
+          test "$(unzip -Z1 "$store_archive")" = "cpa-super-billing.${EXTENSION}"
 
       - name: Verify and package Windows plugin
         if: matrix.os == 'windows'
@@ -306,7 +306,7 @@ jobs:
           TARGET_OBJDUMP: ${{ matrix.objdump }}
           TARGET_GO_CPU: ${{ matrix.go_cpu }}
         run: |
-          $binary = "dist/cpa-cc-billing.$($env:EXTENSION)"
+          $binary = "dist/cpa-super-billing.$($env:EXTENSION)"
           if (-not (Test-Path $binary) -or (Get-Item $binary).Length -eq 0) {
             throw "Missing or empty plugin binary: $binary"
           }
@@ -329,13 +329,13 @@ jobs:
           }
           $version = $env:RELEASE_TAG -replace '^v', ''
 
-          $storeArchive = "cpa-cc-billing_$($version)_$($env:TARGET_OS)_$($env:TARGET_ARCH).zip"
+          $storeArchive = "cpa-super-billing_$($version)_$($env:TARGET_OS)_$($env:TARGET_ARCH).zip"
           Compress-Archive -Path $binary -DestinationPath $storeArchive -Force
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $archive = [IO.Compression.ZipFile]::OpenRead($storeArchive)
           try {
             $entries = @($archive.Entries | ForEach-Object FullName)
-            if ($entries.Count -ne 1 -or $entries[0] -ne "cpa-cc-billing.$($env:EXTENSION)") {
+            if ($entries.Count -ne 1 -or $entries[0] -ne "cpa-super-billing.$($env:EXTENSION)") {
               throw "Unexpected archive contents: $($entries -join ', ')"
             }
           } finally {
@@ -347,8 +347,8 @@ jobs:
         with:
           name: package-${{ matrix.target }}
           path: |
-            cpa-cc-billing_*_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
-            cpa-cc-billing_*_${{ matrix.os }}_${{ matrix.arch }}.zip
+            cpa-super-billing_*_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
+            cpa-super-billing_*_${{ matrix.os }}_${{ matrix.arch }}.zip
           if-no-files-found: error
           retention-days: 1
 
@@ -378,7 +378,7 @@ jobs:
       - name: Generate checksums
         working-directory: release-assets
         run: |
-          sha256sum cpa-cc-billing_*.tar.gz cpa-cc-billing_*.zip | sort > checksums.txt
+          sha256sum cpa-super-billing_*.tar.gz cpa-super-billing_*.zip | sort > checksums.txt
 
       - name: Extract release notes
         run: |

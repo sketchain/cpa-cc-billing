@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
-	"cpa-cc-billing/internal/ccbilling"
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/billing"
+	"cpa-super-billing/internal/ccbilling"
+	"cpa-super-billing/internal/messages"
 )
 
 const (

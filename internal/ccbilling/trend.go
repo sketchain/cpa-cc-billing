@@ -37,9 +37,15 @@ type Trend struct {
 	// retained and judged with.
 	RetentionDays    int     `json:"retention_days"`
 	KMinWeeklyPoints float64 `json:"k_min_weekly_points"`
-	// K is the account's effective k and KSource where it comes from.
+	// Provider is the account's provider; Window the window its segments
+	// measure. Accounts measuring the 7-day window have no k evidence.
+	Provider string `json:"provider"`
+	Window   string `json:"segment_window"`
+	// K is the account's effective k and KSource where it comes from;
+	// NeedsK reports that no k is set or estimated.
 	K         *float64 `json:"k,omitempty"`
 	KSource   string   `json:"k_source"`
+	NeedsK    bool     `json:"needs_k"`
 	Exclusion string   `json:"exclusion"`
 	// Basis is the estimate's basis; on the weighted basis segment costs
 	// are in baseline USD.
@@ -67,7 +73,7 @@ func (m *Manager) Trend(authIndex string) (Trend, bool, error) {
 	if !slices.Contains(settings.authIndexes(), authIndex) {
 		return Trend{}, false, nil
 	}
-	params := settings.Params
+	params := settings.accountParams(authIndex)
 	now := m.host.Now()
 	// The snapshot's cutoff selects exactly the segments its estimate used.
 	asOf := now
@@ -100,9 +106,9 @@ func (m *Manager) Trend(authIndex string) (Trend, bool, error) {
 	var excluded []bool
 	var status AccountStatus
 	if snap != nil {
-		if snap.weights.basis == BasisWeighted {
+		if weights := snap.weights[settings.AccountProvider(authIndex)]; weights.basis == BasisWeighted {
 			// The estimate filtered the converted costs.
-			segments = ConvertSegments(segments, snap.weights.factors)
+			segments = ConvertSegments(segments, weights.factors)
 			trend.Basis = BasisWeighted
 		}
 		excluded = SegmentExclusions(segments, params, snap.at)
@@ -112,7 +118,11 @@ func (m *Manager) Trend(authIndex string) (Trend, bool, error) {
 	} else {
 		status = ResolveAccount(authIndex, settings.Accounts[authIndex], Estimate{}, KEstimate{Basis: KBasisNone}, Observation{}, params, now)
 	}
-	trend.K, trend.KSource = status.K, status.KSource
+	trend.K, trend.KSource, trend.NeedsK = status.K, status.KSource, status.NeedsK
+	trend.Provider, trend.Window = settings.AccountProvider(authIndex), WindowFiveHour
+	if snap != nil {
+		trend.Window = segmentWindow(snap.accounts[authIndex].window)
+	}
 	for i, segment := range segments {
 		hour := segment.At.UTC().Truncate(kBucketWidth)
 		if n := len(trend.Segments); n == 0 || !trend.Segments[n-1].At.Equal(hour) {

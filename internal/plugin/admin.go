@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/billing"
+	"cpa-super-billing/internal/messages"
 )
 
 type keyRow struct {

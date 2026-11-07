@@ -2,11 +2,11 @@
   "schema_version": 1,
   "plugins": [
     {
-      "id": "cpa-cc-billing",
-      "name": "CPA CC Billing",
-      "description": "Splits one Claude subscription's quota between downstream API keys.",
+      "id": "cpa-super-billing",
+      "name": "CPA Super Billing",
+      "description": "Splits Claude and ChatGPT subscription quotas between downstream API keys.",
       "author": "sketchain",
-      "repository": "https://github.com/sketchain/cpa-cc-billing",
+      "repository": "https://github.com/sketchain/cpa-super-billing",
       "license": "MIT"
     }
   ]

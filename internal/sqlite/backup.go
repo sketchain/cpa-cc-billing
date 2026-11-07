@@ -14,7 +14,7 @@ import (
 
 	sqlite3 "github.com/mattn/go-sqlite3"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 // migrationBackupsKept is how many migration backups stay beside a database;
@@ -197,7 +197,14 @@ func (d *DB) backupBeforeMigration(from, to schemaVersions, withCC bool, now tim
 }
 
 func (d *DB) writeBackup(target string, from schemaVersions) error {
-	if _, err := d.db.Exec("VACUUM INTO ?", target); err != nil {
+	return vacuumInto(d.db, target, from.billing)
+}
+
+// vacuumInto copies the database behind handle, including what its
+// write-ahead log still holds, into the empty file target, syncs it and checks
+// that it opens intact at billingVersion.
+func vacuumInto(handle *sql.DB, target string, billingVersion int) error {
+	if _, err := handle.Exec("VACUUM INTO ?", target); err != nil {
 		return err
 	}
 	file, err := os.OpenFile(target, os.O_RDWR, 0)
@@ -211,7 +218,7 @@ func (d *DB) writeBackup(target string, from schemaVersions) error {
 	if errSync != nil {
 		return errSync
 	}
-	return verifyBackup(target, from.billing)
+	return verifyBackup(target, billingVersion)
 }
 
 // verifyBackup opens the copy read-only and checks its structure and format.
@@ -236,6 +243,54 @@ func verifyBackup(path string, billingVersion int) error {
 	if version != billingVersion {
 		return fmt.Errorf("the copy has format %d, want %d", version, billingVersion)
 	}
+	return nil
+}
+
+// CopyDatabase copies the billing database at source into a new file at
+// target the way a migration backup is taken: VACUUM INTO a private partial
+// file beside target, an integrity and format check of the copy, and only then
+// the final name. source is opened read-only and is left as it is; target must
+// not exist yet.
+func CopyDatabase(source, target string) error {
+	if _, err := os.Lstat(target); err == nil {
+		return fmt.Errorf("Copy billing database %s: %s already exists", source, target)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("Copy billing database %s: %w", source, err)
+	}
+	dsn := (&url.URL{Scheme: "file", Path: source, OmitHost: true}).String() + "?mode=ro&_busy_timeout=5000"
+	handle, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return fmt.Errorf("Open billing database %s: %w", source, err)
+	}
+	defer handle.Close()
+	handle.SetMaxOpenConns(1)
+	var version int
+	if err := handle.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return explainDamage(source, fmt.Errorf("Read billing database %s: %w", source, err))
+	}
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("Create billing database directory %s: %w", dir, err)
+	}
+	partial := target + ".partial"
+	// The copy holds what the database holds, so it is private from the start.
+	file, err := os.OpenFile(partial, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("Copy billing database %s: %w", source, err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(partial)
+		return fmt.Errorf("Copy billing database %s: %w", source, err)
+	}
+	if err := vacuumInto(handle, partial, version); err != nil {
+		_ = os.Remove(partial)
+		return fmt.Errorf("Copy billing database %s to %s: %w", source, target, err)
+	}
+	if err := os.Rename(partial, target); err != nil {
+		_ = os.Remove(partial)
+		return fmt.Errorf("Copy billing database %s to %s: %w", source, target, err)
+	}
+	syncDir(dir)
 	return nil
 }
 

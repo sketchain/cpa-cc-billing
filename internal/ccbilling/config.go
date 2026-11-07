@@ -1,20 +1,20 @@
-// Package ccbilling splits one Claude subscription between downstream API keys.
+// Package ccbilling splits subscription accounts (Claude, and ChatGPT through
+// CLIProxyAPI's Codex channel) between downstream API keys.
 //
-// It estimates each Claude account's quota in USD from what the plugin already
-// records passively: the cost of every request and the unified 5-hour and
-// 7-day utilization headers of its response. Fixed keys reserve their weekly
+// It estimates each account's quota in USD from what the plugin already
+// records passively: the cost of every request and the 5-hour and 7-day
+// utilization its response reports. Fixed keys reserve their weekly
 // subscription plan amount; remainder keys may only use what is left.
 package ccbilling
 
 import (
 	"fmt"
-	"maps"
 	"math"
 	"slices"
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 // Key kinds.
@@ -59,24 +59,35 @@ type Params struct {
 	KMinWeeklyPoints float64 `json:"k_min_weekly_points"`
 	// ColdStartBlocks is the number of clean blocks needed to trust the estimate.
 	ColdStartBlocks int `json:"cold_start_blocks"`
-	// Default weekly totals, in USD, while an account is in cold start.
-	TierWeeklyUSD map[string]float64 `json:"tier_weekly_usd"`
-	// TierK is the default weekly/5-hour ratio of each tier, used while an
-	// account has neither a manual nor an estimated k.
-	TierK map[string]float64 `json:"tier_k"`
+	// TierWeeklyUSD and TierK are the default weekly totals, in USD, used
+	// while an account is in cold start, and the default weekly/5-hour
+	// ratios, used while an account has neither a manual nor an estimated k,
+	// of one provider's tiers. Settings keep them in the provider profiles;
+	// ParamsFor fills them in. In stored settings they only appear in those
+	// saved before providers existed, which held Claude's.
+	TierWeeklyUSD map[string]float64 `json:"tier_weekly_usd,omitempty"`
+	TierK         map[string]float64 `json:"tier_k,omitempty"`
 	// RefuseUnloaded refuses remainder keys while the settings are loaded
 	// but no estimate snapshot exists yet.
 	RefuseUnloaded bool `json:"refuse_remainder_when_unloaded"`
 	// SafetyFactor discounts an account's estimated remaining capacity.
 	SafetyFactor float64 `json:"safety_factor"`
+
+	// defaultTier is the tier of accounts without one; rules decide what
+	// feeds the segments. ParamsFor sets both for a provider.
+	defaultTier string
+	rules       SegmentRules
 }
 
-// Pool groups the Claude accounts that fixed and remainder keys share. The
-// anchor account's resets set the cycles and 5-hour window of the pool's
-// keys; normalized settings list it first.
+// Pool groups the accounts of one provider that fixed and remainder keys
+// share. The anchor account's resets set the cycles and 5-hour window of the
+// pool's keys; normalized settings list it first.
 type Pool struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Provider is the provider of every account in the pool; pools saved
+	// before providers existed are Claude's.
+	Provider    string   `json:"provider"`
 	AuthIndexes []string `json:"auth_indexes"`
 	// Anchor is the anchor account. Settings saved before it existed, or
 	// naming an account outside the pool, use the first account.
@@ -85,7 +96,10 @@ type Pool struct {
 
 // AccountSettings are the operator's per-account choices.
 type AccountSettings struct {
-	Tier string `json:"tier,omitempty"`
+	// Provider is the account's provider. Accounts in a pool take their
+	// pool's; it keeps the provider of an account outside every pool.
+	Provider string `json:"provider,omitempty"`
+	Tier     string `json:"tier,omitempty"`
 	// ManualK overrides the estimated weekly/5-hour ratio when set.
 	ManualK *float64 `json:"manual_k,omitempty"`
 }
@@ -101,13 +115,18 @@ type KeySettings struct {
 	WeeklyCapUSD *float64 `json:"weekly_cap_usd,omitempty"`
 }
 
-// Settings is everything the operator configures on the CC page.
+// Settings is everything the operator configures on the subscription split
+// page.
 type Settings struct {
-	Params   Params                     `json:"params"`
-	Pools    []Pool                     `json:"pools"`
-	Accounts map[string]AccountSettings `json:"accounts"`
-	Keys     map[string]KeySettings     `json:"keys"`
-	Weights  WeightSettings             `json:"weights"`
+	Params Params `json:"params"`
+	// Providers holds each supported provider's profile.
+	Providers map[string]ProviderProfile `json:"providers"`
+	Pools     []Pool                     `json:"pools"`
+	Accounts  map[string]AccountSettings `json:"accounts"`
+	Keys      map[string]KeySettings     `json:"keys"`
+	// Weights only appears in settings saved before providers existed; it
+	// held Claude's model quota weights and moves to Claude's profile.
+	Weights *WeightSettings `json:"weights,omitempty"`
 }
 
 // DefaultParams returns the documented defaults.
@@ -128,12 +147,21 @@ func DefaultParams() Params {
 		TierK:                map[string]float64{TierPro: 8, TierMax5x: 8, TierMax20x: 8},
 		RefuseUnloaded:       true,
 		SafetyFactor:         0.9,
+		defaultTier:          TierPro,
 	}
 }
 
+// DefaultGlobalParams are the defaults of the parameters every provider
+// shares; the tier tables belong to the provider profiles.
+func DefaultGlobalParams() Params {
+	params := DefaultParams()
+	params.TierWeeklyUSD, params.TierK, params.defaultTier = nil, nil, ""
+	return params
+}
+
 func DefaultSettings() Settings {
-	return Settings{Params: DefaultParams(), Pools: []Pool{}, Accounts: map[string]AccountSettings{}, Keys: map[string]KeySettings{},
-		Weights: DefaultWeightSettings()}
+	return Settings{Params: DefaultGlobalParams(), Providers: DefaultProviders(), Pools: []Pool{}, Accounts: map[string]AccountSettings{},
+		Keys: map[string]KeySettings{}}
 }
 
 func (p Params) gap() time.Duration { return time.Duration(p.BlockGapMinutes * float64(time.Minute)) }
@@ -144,21 +172,37 @@ func (p Params) retention() time.Duration {
 	return time.Duration(p.SegmentRetentionDays) * 24 * time.Hour
 }
 
-// TierWeekly is the default weekly total of a tier; an unknown tier is treated
-// as the smallest, so an unconfigured account errs on the conservative side.
-func (p Params) TierWeekly(tier string) float64 {
-	if value, ok := p.TierWeeklyUSD[tier]; ok {
-		return value
+// fallbackTier is the tier an account without a known tier is treated as: the
+// provider's first, which for Claude is the smallest, so an unconfigured
+// account errs on the conservative side.
+func (p Params) fallbackTier() string {
+	if p.defaultTier != "" {
+		return p.defaultTier
 	}
-	return p.TierWeeklyUSD[TierPro]
+	return TierPro
 }
 
-// TierKFor is the default k of a tier; an unknown tier uses Pro's.
-func (p Params) TierKFor(tier string) float64 {
-	if value, ok := p.TierK[tier]; ok {
-		return value
+// resolveTier is tier when the provider has it, else the fallback tier.
+func (p Params) resolveTier(tier string) string {
+	if _, ok := p.TierWeeklyUSD[tier]; ok {
+		return tier
 	}
-	return p.TierK[TierPro]
+	return p.fallbackTier()
+}
+
+// TierWeekly is the default weekly total of a tier; an unknown tier uses the
+// fallback tier's.
+func (p Params) TierWeekly(tier string) float64 {
+	return p.TierWeeklyUSD[p.resolveTier(tier)]
+}
+
+// TierKFor is the default k of a tier, nil when the tier has none; an unknown
+// tier uses the fallback tier's.
+func (p Params) TierKFor(tier string) *float64 {
+	if value, ok := p.TierK[p.resolveTier(tier)]; ok {
+		return &value
+	}
+	return nil
 }
 
 func finite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }
@@ -190,42 +234,46 @@ func (p Params) validate() error {
 	case !finite(p.SafetyFactor) || p.SafetyFactor <= 0 || p.SafetyFactor > 1:
 		return fmt.Errorf("safety_factor must be greater than 0 and at most 1")
 	}
-	for _, tier := range []string{TierPro, TierMax5x, TierMax20x} {
-		if value, ok := p.TierWeeklyUSD[tier]; !ok || !finite(value) || value <= 0 || value > 1e9 {
-			return fmt.Errorf("tier_weekly_usd.%s must be a positive amount", tier)
-		}
-	}
-	for tier := range p.TierWeeklyUSD {
-		if tier != TierPro && tier != TierMax5x && tier != TierMax20x {
-			return fmt.Errorf("Unknown tier %q", tier)
-		}
-	}
-	for _, tier := range []string{TierPro, TierMax5x, TierMax20x} {
-		if value, ok := p.TierK[tier]; !ok || !finite(value) || value < 1 || value > 100 {
-			return fmt.Errorf("tier_k.%s must be from 1 to 100", tier)
-		}
-	}
-	for tier := range p.TierK {
-		if tier != TierPro && tier != TierMax5x && tier != TierMax20x {
-			return fmt.Errorf("Unknown tier %q", tier)
-		}
-	}
 	return nil
 }
 
 // Normalized validates the settings and returns a canonical copy.
+//
+// Settings saved before providers existed are Claude's: their tier tables and
+// weights move to Claude's profile, and their pools are Claude pools.
+// Normalizing normalized settings changes nothing.
 func (s Settings) Normalized() (Settings, error) {
-	if err := s.Params.validate(); err != nil {
+	global := s.Params
+	legacyWeekly, legacyK := global.TierWeeklyUSD, global.TierK
+	global.TierWeeklyUSD, global.TierK, global.defaultTier, global.rules = nil, nil, "", SegmentRules{}
+	if err := global.validate(); err != nil {
 		return Settings{}, err
 	}
-	weights, err := s.Weights.normalized()
-	if err != nil {
-		return Settings{}, err
+	for name := range s.Providers {
+		if _, known := DefaultProviderProfile(name); !known {
+			return Settings{}, messages.Errorf("Unknown provider %q", name)
+		}
 	}
-	out := Settings{Params: s.Params, Pools: make([]Pool, 0, len(s.Pools)),
-		Accounts: make(map[string]AccountSettings, len(s.Accounts)), Keys: make(map[string]KeySettings, len(s.Keys)), Weights: weights}
-	out.Params.TierWeeklyUSD = maps.Clone(s.Params.TierWeeklyUSD)
-	out.Params.TierK = maps.Clone(s.Params.TierK)
+	providers := make(map[string]ProviderProfile, len(Providers))
+	for _, name := range Providers {
+		input, ok := s.Providers[name]
+		if !ok {
+			input, _ = DefaultProviderProfile(name)
+			if name == ProviderClaude {
+				input = legacyTiers(input, legacyWeekly, legacyK)
+				if s.Weights != nil {
+					input.Weights = *s.Weights
+				}
+			}
+		}
+		profile, err := normalizedProvider(name, input, global)
+		if err != nil {
+			return Settings{}, err
+		}
+		providers[name] = profile
+	}
+	out := Settings{Params: global, Providers: providers, Pools: make([]Pool, 0, len(s.Pools)),
+		Accounts: make(map[string]AccountSettings, len(s.Accounts)), Keys: make(map[string]KeySettings, len(s.Keys))}
 	ids := map[string]bool{}
 	owners := map[string]string{}
 	for _, pool := range s.Pools {
@@ -237,6 +285,13 @@ func (s Settings) Normalized() (Settings, error) {
 			return Settings{}, fmt.Errorf("Pool names must not exceed 128 bytes")
 		}
 		ids[pool.ID] = true
+		pool.Provider = strings.TrimSpace(pool.Provider)
+		if pool.Provider == "" {
+			pool.Provider = ProviderClaude
+		}
+		if _, known := providers[pool.Provider]; !known {
+			return Settings{}, messages.Errorf("Unknown provider %q", pool.Provider)
+		}
 		var indexes []string
 		label := pool.Name
 		if label == "" {
@@ -267,15 +322,34 @@ func (s Settings) Normalized() (Settings, error) {
 		pool.AuthIndexes = indexes
 		out.Pools = append(out.Pools, pool)
 	}
+	poolProvider := map[string]string{}
+	for _, pool := range out.Pools {
+		for _, index := range pool.AuthIndexes {
+			poolProvider[index] = pool.Provider
+		}
+	}
 	for index, account := range s.Accounts {
 		index = strings.TrimSpace(index)
 		if index == "" {
 			continue
 		}
-		switch account.Tier {
-		case "", TierPro, TierMax5x, TierMax20x:
-		default:
-			return Settings{}, fmt.Errorf("Account tier must be pro, max5x or max20x")
+		account.Provider = strings.TrimSpace(account.Provider)
+		if provider, pooled := poolProvider[index]; pooled {
+			account.Provider = provider
+		}
+		provider := account.Provider
+		if provider == "" {
+			provider = ProviderClaude
+		} else if provider == ProviderClaude {
+			// Claude is the default; saved settings leave it out.
+			account.Provider = ""
+		}
+		profile, known := providers[provider]
+		if !known {
+			return Settings{}, messages.Errorf("Unknown provider %q", provider)
+		}
+		if account.Tier != "" && !profile.hasTier(account.Tier) {
+			return Settings{}, messages.Errorf("Tier %q is not a tier of %s accounts", account.Tier, providerLabel(provider))
 		}
 		if account.ManualK != nil && (!finite(*account.ManualK) || *account.ManualK < 1 || *account.ManualK > 100) {
 			return Settings{}, fmt.Errorf("Manual k must be from 1 to 100")

@@ -16,15 +16,15 @@ const (
 // Plugin identity. PluginID doubles as the dynamic library file name, the
 // `plugins.configs` key, and the Management/resource route segment.
 const (
-	PluginID   = "cpa-cc-billing"
-	PluginName = "CPA CC Billing"
-	Version    = "0.2.1"
+	PluginID   = "cpa-super-billing"
+	PluginName = "CPA Super Billing"
+	Version    = "0.3.0"
 
-	MenuLabel       = "CPA CC Billing"
-	MenuDescription = "Split Claude subscription quotas between downstream API keys, and manage their routing, billing, concurrency limits and usage"
+	MenuLabel       = "CPA Super Billing"
+	MenuDescription = "Split Claude and ChatGPT subscription quotas between downstream API keys, and manage their routing, billing, concurrency limits and usage"
 
 	PluginAuthor     = "sketchain"
-	GitHubRepository = "https://github.com/sketchain/cpa-cc-billing"
+	GitHubRepository = "https://github.com/sketchain/cpa-super-billing"
 )
 
 const (

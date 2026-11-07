@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 // A scope reads its fewer requests through its own index; the unary + keeps

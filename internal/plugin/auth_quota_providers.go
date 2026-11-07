@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 func (a *App) fetchAuthQuota(callbackID string, file hostAuthFile) (authQuotaResponse, error) {

@@ -4,7 +4,7 @@ import (
 	"math"
 	"time"
 
-	"cpa-cc-billing/internal/messages"
+	"cpa-super-billing/internal/messages"
 )
 
 // Sources of an account's totals and k.
@@ -19,6 +19,7 @@ const (
 // AccountStatus is one account's estimate and current capacity.
 type AccountStatus struct {
 	AuthIndex string `json:"auth_index"`
+	Provider  string `json:"provider"`
 	Tier      string `json:"tier"`
 	Estimate
 	KAuto      *float64  `json:"k_auto,omitempty"`
@@ -28,6 +29,9 @@ type AccountStatus struct {
 	KEstimate  KEstimate `json:"k_estimate"`
 	ColdStart  bool      `json:"cold_start"`
 	TotalsFrom string    `json:"totals_from"`
+	// NeedsK reports an account whose 5-hour reservation needs a k it does
+	// not have: no manual, estimated or tier default k.
+	NeedsK bool `json:"needs_k"`
 	// FiveHourTotal and WeeklyTotal are the effective totals in USD. A zero
 	// FiveHourTotal means it is unknown, which disables 5-hour reservations.
 	FiveHourTotal float64 `json:"five_hour_total_usd"`
@@ -42,15 +46,33 @@ type AccountStatus struct {
 	// RemainingWeek and RemainingFiveHour are R_week and R_5h after the safety factor.
 	RemainingWeek     float64 `json:"remaining_week_usd"`
 	RemainingFiveHour float64 `json:"remaining_five_hour_usd"`
+	// Paused reports that the account's estimate stopped updating, and why.
+	Paused      bool      `json:"paused"`
+	PauseReason string    `json:"pause_reason,omitempty"`
+	PausedSince time.Time `json:"paused_since,omitzero"`
 }
 
+// Segment windows.
+const (
+	WindowFiveHour = "5h"
+	WindowWeek     = "7d"
+)
+
 // ResolveAccount combines an account's estimate, k evidence and latest report.
+// params are the parameters of the account's provider.
+//
+// Segments of the 5-hour window give its total; k turns it into the weekly
+// total. Without any k the weekly total is the tier's default and 5-hour
+// reservations are off. Segments of the 7-day window, for accounts whose
+// reports have no 5-hour window, give the weekly total directly, without k,
+// and such accounts have no 5-hour reservation.
 func ResolveAccount(authIndex string, settings AccountSettings, estimate Estimate, k KEstimate, latest Observation, params Params, now time.Time) AccountStatus {
 	status := AccountStatus{AuthIndex: authIndex, Tier: settings.Tier, Estimate: estimate, KManual: settings.ManualK,
 		KEstimate: k, KSource: SourceNone, ObservedAt: latest.At}
 	if status.Tier == "" {
-		status.Tier = TierPro
+		status.Tier = params.fallbackTier()
 	}
+	weekly := estimate.Window == WindowWeek
 	status.KAuto = k.K
 	switch {
 	case settings.ManualK != nil:
@@ -58,21 +80,34 @@ func ResolveAccount(authIndex string, settings AccountSettings, estimate Estimat
 	case status.KAuto != nil:
 		status.K, status.KSource = status.KAuto, SourceAuto
 	default:
-		// Without a manual or estimated k the tier's default keeps the 5-hour
-		// reservation working.
-		tierK := params.TierKFor(status.Tier)
-		status.K, status.KSource = &tierK, SourceTier
+		// Without a manual or estimated k the tier's default, if it has one,
+		// keeps the 5-hour reservation working.
+		if tierK := params.TierKFor(status.Tier); tierK != nil {
+			status.K, status.KSource = tierK, SourceTier
+		}
 	}
 	status.ColdStart = estimate.CleanBlocks < params.ColdStartBlocks || estimate.FiveHourUSD <= 0
-	if status.ColdStart {
+	switch {
+	case status.ColdStart:
 		status.TotalsFrom = SourceTier
 		status.WeeklyTotal = params.TierWeekly(status.Tier)
-		status.FiveHourTotal = status.WeeklyTotal / *status.K
-	} else {
+		if status.K != nil && !weekly {
+			status.FiveHourTotal = status.WeeklyTotal / *status.K
+		}
+	case weekly:
+		status.TotalsFrom = SourceEstimated
+		status.WeeklyTotal = estimate.FiveHourUSD
+	case status.K != nil:
 		status.TotalsFrom = SourceEstimated
 		status.FiveHourTotal = estimate.FiveHourUSD
 		status.WeeklyTotal = *status.K * estimate.FiveHourUSD
+	default:
+		// The 5-hour total is measured, but the weekly total needs k.
+		status.TotalsFrom = SourceTier
+		status.FiveHourTotal = estimate.FiveHourUSD
+		status.WeeklyTotal = params.TierWeekly(status.Tier)
 	}
+	status.NeedsK = status.K == nil && !weekly
 	if latest.Has5h && latest.Reset5h.After(now) {
 		status.Used5h, status.Reset5h = latest.Used5h, latest.Reset5h
 	} else if latest.Has5h && latest.Reset5h.IsZero() {
@@ -116,6 +151,7 @@ type FixedKeyStatus struct {
 type PoolStatus struct {
 	ID                string           `json:"id"`
 	Name              string           `json:"name"`
+	Provider          string           `json:"provider"`
 	Accounts          []string         `json:"auth_indexes"`
 	RemainingWeek     float64          `json:"remaining_week_usd"`
 	RemainingFiveHour float64          `json:"remaining_five_hour_usd"`
@@ -135,7 +171,7 @@ type PoolStatus struct {
 // are refused (see Manager.checkSharedPlans), and supporting them would mean
 // reserving each shared plan's balance once here instead of once per key.
 func BuildPool(pool Pool, accounts []AccountStatus, fixed []FixedKeyUsage) PoolStatus {
-	status := PoolStatus{ID: pool.ID, Name: pool.Name, Accounts: pool.AuthIndexes, Fixed: []FixedKeyStatus{}}
+	status := PoolStatus{ID: pool.ID, Name: pool.Name, Provider: pool.Provider, Accounts: pool.AuthIndexes, Fixed: []FixedKeyStatus{}}
 	var weekly, fiveHour float64
 	status.FiveHourEnabled = len(accounts) > 0
 	for i, account := range accounts {
@@ -203,7 +239,7 @@ func refusal(reason string, retryAt time.Time, format string, args ...any) Decis
 // capUSD and usedCap describe its optional own weekly cap.
 func (p PoolStatus) AdmitRemainder(capUSD *float64, usedCap float64) Decision {
 	if len(p.Accounts) == 0 {
-		return refusal(RefusedNoPool, time.Time{}, "CC pool %q has no Claude account.", p.label())
+		return refusal(RefusedNoPool, time.Time{}, "CC pool %q has no account.", p.label())
 	}
 	if p.RemainingWeek <= p.ReservedWeek {
 		return refusal(RefusedWeekly, p.Reset7d,

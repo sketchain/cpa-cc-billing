@@ -3,7 +3,7 @@ package sqlite
 import (
 	"testing"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 func TestUpsertPricesRollsBackTogether(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"cpa-cc-billing/internal/billing"
+	"cpa-super-billing/internal/billing"
 )
 
 const configCredentialColumns = `ref, provider, key_preview, disabled, auth_index, type, name,

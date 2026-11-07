@@ -3,7 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CPA CC Billing</title>
+    <title>CPA Super Billing</title>
+    <script>
+      /*storage-migration.js*/
+    </script>
     <script>
       /*standalone.js*/
     </script>
@@ -49,7 +52,7 @@
 
       <main id="app" class="hidden">
         <header class="head app-header">
-          <div class="app-title"><h1><span data-lucide-icon="key" aria-hidden="true"></span><span>CPA CC Billing</span></h1></div>
+          <div class="app-title"><h1><span data-lucide-icon="key" aria-hidden="true"></span><span>CPA Super Billing</span></h1></div>
           <div class="standalone-actions" aria-label="Page actions" data-i18n-aria-label="ui.page_actions">
             <button type="button" class="icon-action" data-page-action="theme" aria-label="Switch theme" data-i18n-aria-label="ui.switch_theme"></button>
             <button type="button" class="icon-action" data-page-action="logout" aria-label="Sign out" data-i18n-aria-label="ui.sign_out"></button>
@@ -66,7 +69,7 @@
                 <button type="button" data-tab="errors" data-i18n="ui.error_events">Error events</button>
                 <button type="button" data-tab="auth-files" data-i18n="ui.auth_files">Auth Files</button>
                 <button type="button" data-tab="ai-providers" data-i18n="ui.ai_providers">AI Providers</button>
-                <button type="button" data-tab="cc" data-i18n="cc.tab">CC split</button>
+                <button type="button" data-tab="split" data-i18n="cc.tab">Subscription split</button>
                 <button type="button" data-tab="settings" data-i18n="ui.settings">Settings</button>
               </div>
               <span class="native-select page-tab-select">
@@ -334,10 +337,10 @@
           </div>
         </section>
 
-        <section id="tab-cc" class="hidden">
+        <section id="tab-split" class="hidden">
           <div class="card">
             <div class="row spread section-toolbar">
-              <h2 data-i18n="cc.title">CC split</h2>
+              <h2 data-i18n="cc.title">Subscription split</h2>
               <div class="row section-actions">
                 <button id="cc-refresh" type="button" data-i18n="cc.refresh_estimates">Refresh estimates</button>
                 <button id="cc-rebuild" type="button" data-i18n="cc.rebuild">Rebuild from history</button>
@@ -562,9 +565,9 @@
       </main>
     </div>
     <footer class="page-footer">
-      <span>© 2026 <a href="https://github.com/sketchain/cpa-cc-billing" target="_blank" rel="noopener noreferrer">CPA CC Billing</a></span>
-      <span>&thinsp;·&thinsp;<a href="https://github.com/sketchain/cpa-cc-billing/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" data-i18n="ui.license">License</a></span>
-      <span>&thinsp;·&thinsp;<span data-i18n="ui.version">Version</span>: v0.2.1</span>
+      <span>© 2026 <a href="https://github.com/sketchain/cpa-super-billing" target="_blank" rel="noopener noreferrer">CPA Super Billing</a></span>
+      <span>&thinsp;·&thinsp;<a href="https://github.com/sketchain/cpa-super-billing/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" data-i18n="ui.license">License</a></span>
+      <span>&thinsp;·&thinsp;<span data-i18n="ui.version">Version</span>: v0.3.0</span>
     </footer>
 
     <div id="notice" class="notice" popover="manual"></div>
@@ -691,7 +694,7 @@
           <div id="auth-drawer-resets"></div>
         </section>
         <section id="auth-drawer-cc-section" class="drawer-section hidden" aria-labelledby="auth-drawer-cc-title">
-          <h3 id="auth-drawer-cc-title" data-i18n="cc.auth_estimate_title">CC split estimate</h3>
+          <h3 id="auth-drawer-cc-title" data-i18n="cc.auth_estimate_title">Subscription split estimate</h3>
           <div id="auth-drawer-cc"></div>
         </section>
         <section class="drawer-section" aria-labelledby="auth-drawer-windows-title">

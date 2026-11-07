@@ -163,3 +163,18 @@ test("ranges end today and too little data is reported", () => {
   assert.equal(ccTrendEnough(week), false);
   assert.equal(ccTrendEnough([]), false);
 });
+
+test("7-day window accounts take the weekly total from their segments without k", () => {
+  const data = trend({ segment_window: "7d", segment_hours: [hour("2026-10-01T10:00:00Z", 1.2, 2), hour("2026-10-02T10:00:00Z", 0.6, 1)] });
+  const days = byKey(ccTrendDays(data, { now: Date.parse("2026-10-02T12:00:00Z"), offset: hours(0) }));
+  close(days["2026-10-01"].weekly, 60);
+  assert.equal(days["2026-10-01"].weeklyBasis, "window");
+  assert.ok(ccTrendTooltipLines(days["2026-10-02"], data).some((line) => line.startsWith("cc.trend_tip_weekly_window")));
+});
+
+test("accounts that need a k draw no weekly total", () => {
+  const data = trend({ needs_k: true, buckets: [bucket("2026-10-01T10:00:00Z", 60, 10)], segment_hours: [hour("2026-10-01T10:00:00Z", 1, 2)] });
+  const [day] = ccTrendDays(data, { now: Date.parse("2026-10-01T12:00:00Z"), offset: hours(0) });
+  assert.equal(day.weekly, null);
+  assert.equal(day.weeklyBasis, null);
+});
